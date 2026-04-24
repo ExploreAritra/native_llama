@@ -4,6 +4,8 @@
 #include <android/log.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <chrono>
+#include <thread>
 #include "llama.h"
 #include "ggml-backend.h"
 
@@ -44,7 +46,7 @@ Java_com_timebox_native_1llama_NativeLlamaPlugin_initLlama(JNIEnv *env, jobject 
 
     // RAM SHIELD: Prevent OS OOM Kills. Limit model size to ~65% of total RAM.
     if (fileSizeGB > 0 && fileSizeGB > (memoryGB * 0.65)) {
-        LOGE("RAM SHIELD: Model size (%.2f GB) exceeds safe limits for device RAM (%.2f GB). Aborting load to prevent OS crash.", fileSizeGB, memoryGB);
+        LOGE("RAM SHIELD: Model size (%.2f GB) exceeds safe limits for device RAM (%.2f GB). Aborting load.", fileSizeGB, memoryGB);
         env->ReleaseStringUTFChars(model_path, path);
         return JNI_FALSE;
     }
@@ -302,6 +304,7 @@ const uint32_t n_ctx_max = llama_n_ctx(ctx);
 const int n_draft = 5;
 bool is_eog_reached = false;
 
+// --- BATCH REUSE OPTIMIZATION ---
 llama_batch decode_batch = llama_batch_init(1, 0, 1);
 decode_batch.n_seq_id[0] = 1;
 decode_batch.seq_id[0][0] = 0;
@@ -401,8 +404,11 @@ jstring eos = env->NewStringUTF("__END_OF_STREAM__");
 env->CallVoidMethod(thiz, methodID, eos);
 env->DeleteLocalRef(eos);
 
-llama_batch_free(decode_batch);
+llama_batch_free(decode_batch); // Free reusable batch
 llama_sampler_free(smpl);
+
+// NEW: Give JNI a tiny window (50ms) to flush the final CallVoidMethod to the Kotlin Main Looper before the native thread dies.
+std::this_thread::sleep_for(std::chrono::milliseconds(50));
 }
 
 JNIEXPORT void JNICALL

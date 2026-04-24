@@ -80,8 +80,10 @@ public class NativeLlamaPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                                                         topP: topP) { [weak self] token in
                     guard let token = token else { return }
                     DispatchQueue.main.async {
+                        // FIX: Pass the EOS string explicitly so Dart can catch it manually
                         if token == "__END_OF_STREAM__" {
                             UIApplication.shared.isIdleTimerDisabled = false
+                            self?.eventSink?(token)
                             self?.eventSink?(FlutterEndOfEventStream)
                         } else {
                             self?.eventSink?(token)

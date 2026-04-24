@@ -76,10 +76,22 @@ class NativeLlama {
     controller.onListen = () {
       subscription = _eventChannel.receiveBroadcastStream().listen(
             (event) {
-          controller.add(event.toString());
+          final token = event.toString();
+
+          // FIX: Manually close the stream when Dart catches the EOS token
+          // This prevents Android UI loaders from hanging!
+          if (token == "__END_OF_STREAM__") {
+            if (!controller.isClosed) controller.close();
+          } else {
+            controller.add(token);
+          }
         },
-        onDone: () => controller.close(),
-        onError: (e) => controller.addError(e),
+        onDone: () {
+          if (!controller.isClosed) controller.close();
+        },
+        onError: (e) {
+          if (!controller.isClosed) controller.addError(e);
+        },
       );
 
       controller.onCancel = () {
@@ -97,7 +109,7 @@ class NativeLlama {
         'topK': topK,
         'topP': topP,
       }).catchError((e) {
-        controller.addError(e);
+        if (!controller.isClosed) controller.addError(e);
       });
     };
 

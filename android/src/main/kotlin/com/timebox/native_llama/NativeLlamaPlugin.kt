@@ -132,14 +132,13 @@ class NativeLlamaPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHa
         disposeLlama()
     }
 
-    // Called from C++ JNI
+    // FIX: Push EOS string explicitly so Dart can catch it manually
     @Keep
     fun onTokenReceived(token: String) {
         handler.post {
+            eventSink?.success(token)
             if (token == "__END_OF_STREAM__") {
                 eventSink?.endOfStream()
-            } else {
-                eventSink?.success(token)
             }
         }
     }
