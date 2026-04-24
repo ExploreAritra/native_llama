@@ -27,10 +27,10 @@ class NativeLlamaPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHa
     }
 
     // Native JNI bindings
-    private external fun initLlama(modelPath: String): Boolean
-    private external fun initDraftModel(modelPath: String): Boolean
+    private external fun initLlama(modelPath: String, nCtx: Int, nThreads: Int): Boolean
+    private external fun initDraftModel(modelPath: String, nCtx: Int, nThreads: Int): Boolean
     private external fun getEmbedding(text: String): DoubleArray?
-    private external fun startNativeGeneration(roles: Array<String>, contents: Array<String>)
+    private external fun startNativeGeneration(roles: Array<String>, contents: Array<String>, temperature: Float, topK: Int, topP: Float)
     private external fun abortGeneration()
     private external fun disposeLlama()
 
@@ -46,9 +46,12 @@ class NativeLlamaPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHa
         when (call.method) {
             "initModel" -> {
                 val modelPath = call.argument<String>("modelPath")
+                val nCtx = call.argument<Int>("nCtx") ?: -1
+                val nThreads = call.argument<Int>("nThreads") ?: -1
+
                 if (modelPath != null) {
                     executor.execute {
-                        val success = initLlama(modelPath)
+                        val success = initLlama(modelPath, nCtx, nThreads)
                         handler.post { result.success(success) }
                     }
                 } else {
@@ -57,9 +60,12 @@ class NativeLlamaPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHa
             }
             "initDraftModel" -> {
                 val modelPath = call.argument<String>("modelPath")
+                val nCtx = call.argument<Int>("nCtx") ?: -1
+                val nThreads = call.argument<Int>("nThreads") ?: -1
+
                 if (modelPath != null) {
                     executor.execute {
-                        val success = initDraftModel(modelPath)
+                        val success = initDraftModel(modelPath, nCtx, nThreads)
                         handler.post { result.success(success) }
                     }
                 } else {
@@ -83,9 +89,15 @@ class NativeLlamaPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHa
             "startGeneration" -> {
                 val roles = call.argument<List<String>>("roles")?.toTypedArray()
                 val contents = call.argument<List<String>>("contents")?.toTypedArray()
+
+                // Cast Double from Dart to Float for Kotlin/C++ boundary
+                val temperature = call.argument<Double>("temperature")?.toFloat() ?: 0.7f
+                val topK = call.argument<Int>("topK") ?: 40
+                val topP = call.argument<Double>("topP")?.toFloat() ?: 0.9f
+
                 if (roles != null && contents != null) {
                     executor.execute {
-                        startNativeGeneration(roles, contents)
+                        startNativeGeneration(roles, contents, temperature, topK, topP)
                     }
                     result.success(null)
                 } else {

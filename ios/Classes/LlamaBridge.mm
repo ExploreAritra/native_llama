@@ -3,6 +3,7 @@
 #import "ggml-backend.h"
 #import <vector>
 #import <string>
+#import <sys/stat.h>
 
 @implementation LlamaBridge {
     llama_model *model;
@@ -35,8 +36,24 @@
     return self;
 }
 
-- (BOOL)initModel:(NSString *)modelPath {
+- (BOOL)initModel:(NSString *)modelPath nCtx:(int)nCtx nThreads:(int)nThreads {
     const char *path = [modelPath UTF8String];
+
+    uint64_t physicalMemory = [[NSProcessInfo processInfo] physicalMemory];
+    double memoryGB = physicalMemory / (1024.0 * 1024.0 * 1024.0);
+
+    // RAM SHIELD: Check file size against physical device RAM
+    struct stat stat_buf;
+    double fileSizeGB = 0;
+    if (stat(path, &stat_buf) == 0) {
+        fileSizeGB = stat_buf.st_size / (1024.0 * 1024.0 * 1024.0);
+    }
+
+    if (fileSizeGB > 0 && fileSizeGB > (memoryGB * 0.65)) {
+        NSLog(@"NATIVE_LLAMA: RAM SHIELD - Model size (%.2f GB) exceeds safe limits for device RAM (%.2f GB). Aborting load.", fileSizeGB, memoryGB);
+        return NO;
+    }
+
     [self unload];
 
     auto mparams = llama_model_default_params();
@@ -47,18 +64,19 @@
     if (model == nullptr) return NO;
 
     auto cparams = llama_context_default_params();
-    cparams.n_threads = 4;
-    cparams.embeddings = true; // MATCHING ANDROID
+    cparams.n_threads = nThreads > 0 ? nThreads : 4;
+    cparams.embeddings = true;
     cparams.type_k = GGML_TYPE_Q8_0;
     cparams.type_v = GGML_TYPE_Q8_0;
 
-    // MATCHING ANDROID CONTEXT SIZE LOGIC
-    uint64_t physicalMemory = [[NSProcessInfo processInfo] physicalMemory];
-    double memoryGB = physicalMemory / (1024.0 * 1024.0 * 1024.0);
-    int32_t dynamic_n_ctx = 4096;
-    if (memoryGB >= 7.5) dynamic_n_ctx = 8192;
-    if (memoryGB >= 11.5) dynamic_n_ctx = 16384;
-    cparams.n_ctx = dynamic_n_ctx;
+    if (nCtx > 0) {
+        cparams.n_ctx = nCtx;
+    } else {
+        int32_t dynamic_n_ctx = 4096;
+        if (memoryGB >= 7.5) dynamic_n_ctx = 8192;
+        if (memoryGB >= 11.5) dynamic_n_ctx = 16384;
+        cparams.n_ctx = dynamic_n_ctx;
+    }
 
     ctx = llama_init_from_model(model, cparams);
     if (ctx == nullptr) {
@@ -69,31 +87,34 @@
     return YES;
 }
 
-- (BOOL)initDraftModel:(NSString *)modelPath {
+- (BOOL)initDraftModel:(NSString *)modelPath nCtx:(int)nCtx nThreads:(int)nThreads {
     const char *path = [modelPath UTF8String];
     if (ctx_draft) { llama_free(ctx_draft); ctx_draft = nullptr; }
     if (model_draft) { llama_model_free(model_draft); model_draft = nullptr; }
 
     auto mparams = llama_model_default_params();
     mparams.n_gpu_layers = 99;
-    mparams.use_mmap = false; // Required for iOS memory file mapping limits
+    mparams.use_mmap = false;
 
     model_draft = llama_model_load_from_file(path, mparams);
     if (model_draft == nullptr) return NO;
 
     auto cparams = llama_context_default_params();
-    cparams.n_threads = 4;
-    cparams.embeddings = true; // MATCHING ANDROID
+    cparams.n_threads = nThreads > 0 ? nThreads : 4;
+    cparams.embeddings = true;
     cparams.type_k = GGML_TYPE_Q8_0;
     cparams.type_v = GGML_TYPE_Q8_0;
 
-    // MATCHING ANDROID CONTEXT SIZE LOGIC
-    uint64_t physicalMemory = [[NSProcessInfo processInfo] physicalMemory];
-    double memoryGB = physicalMemory / (1024.0 * 1024.0 * 1024.0);
-    int32_t dynamic_n_ctx = 4096;
-    if (memoryGB >= 7.5) dynamic_n_ctx = 8192;
-    if (memoryGB >= 11.5) dynamic_n_ctx = 16384;
-    cparams.n_ctx = dynamic_n_ctx;
+    if (nCtx > 0) {
+        cparams.n_ctx = nCtx;
+    } else {
+        uint64_t physicalMemory = [[NSProcessInfo processInfo] physicalMemory];
+        double memoryGB = physicalMemory / (1024.0 * 1024.0 * 1024.0);
+        int32_t dynamic_n_ctx = 4096;
+        if (memoryGB >= 7.5) dynamic_n_ctx = 8192;
+        if (memoryGB >= 11.5) dynamic_n_ctx = 16384;
+        cparams.n_ctx = dynamic_n_ctx;
+    }
 
     ctx_draft = llama_init_from_model(model_draft, cparams);
     return ctx_draft != nullptr;
@@ -131,7 +152,7 @@
     return result;
 }
 
-- (void)startGenerationWithRoles:(NSArray<NSString *> *)roles contents:(NSArray<NSString *> *)contents onToken:(void (^)(NSString *))onToken {
+- (void)startGenerationWithRoles:(NSArray<NSString *> *)roles contents:(NSArray<NSString *> *)contents temperature:(float)temperature topK:(int)topK topP:(float)topP onToken:(void (^)(NSString *))onToken {
     if (ctx == nullptr || model == nullptr) return;
     stop_generation = false;
     const struct llama_vocab * vocab = llama_model_get_vocab(model);
@@ -174,13 +195,14 @@
 
     auto sparams = llama_sampler_chain_default_params();
     llama_sampler * smpl = llama_sampler_chain_init(sparams);
-    llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.7f));
-    llama_sampler_chain_add(smpl, llama_sampler_init_top_k(40));
-    llama_sampler_chain_add(smpl, llama_sampler_init_top_p(0.9f, 1));
+
+    // Inject Dynamic Sampler Parameters
+    llama_sampler_chain_add(smpl, llama_sampler_init_temp(temperature));
+    llama_sampler_chain_add(smpl, llama_sampler_init_top_k(topK));
+    llama_sampler_chain_add(smpl, llama_sampler_init_top_p(topP, 1));
     llama_sampler_chain_add(smpl, llama_sampler_init_penalties(128, 1.2f, 0.1f, 0.1f));
     llama_sampler_chain_add(smpl, llama_sampler_init_dist(42));
 
-    // MATCHING ANDROID EXACTLY: Pass the whole prompt, no manual chunking
     llama_batch batch = llama_batch_init((int)prompt_tokens.size(), 0, 1);
     batch.n_tokens = (int)prompt_tokens.size();
     for (int i = 0; i < (int)prompt_tokens.size(); ++i) {
@@ -199,8 +221,13 @@
 
     if (ctx_draft) {
         llama_memory_seq_rm(llama_get_memory(ctx_draft), -1, -1, -1);
+
+        // FIX: Restore logits array after main context mutation
+        for (int i = 0; i < batch.n_tokens; ++i) {
+            batch.logits[i] = (i == batch.n_tokens - 1);
+        }
+
         if (llama_decode(ctx_draft, batch) != 0) {
-            // If the draft model fails, silently disable it to prevent full app crashes
             llama_free(ctx_draft);
             ctx_draft = nullptr;
         }
@@ -212,6 +239,11 @@
     const uint32_t n_ctx_max = llama_n_ctx(ctx);
     const int n_draft = 5;
     bool is_eog_reached = false;
+
+    llama_batch decode_batch = llama_batch_init(1, 0, 1);
+    decode_batch.n_seq_id[0] = 1;
+    decode_batch.seq_id[0][0] = 0;
+    decode_batch.logits[0] = true;
 
     while (true) {
         if (stop_generation || is_eog_reached) break;
@@ -238,16 +270,11 @@
                 llama_sampler_accept(smpl, t);
                 draft_tokens.push_back(t);
 
-                llama_batch b_draft = llama_batch_init(1, 0, 1);
-                b_draft.token[0] = draft_tokens.back();
-                b_draft.pos[0] = n_cur + i;
-                b_draft.n_seq_id[0] = 1;
-                b_draft.seq_id[0][0] = 0;
-                b_draft.logits[0] = true;
-                b_draft.n_tokens = 1;
+                decode_batch.token[0] = draft_tokens.back();
+                decode_batch.pos[0] = n_cur + i;
+                decode_batch.n_tokens = 1;
 
-                if (llama_decode(ctx_draft, b_draft) != 0) { llama_batch_free(b_draft); break; }
-                llama_batch_free(b_draft);
+                if (llama_decode(ctx_draft, decode_batch) != 0) { break; }
             }
         }
 
@@ -304,21 +331,18 @@
         llama_sampler_accept(smpl, t_extra);
         if (is_eog_reached || llama_vocab_is_eog(vocab, t_extra)) { is_eog_reached = true; break; }
 
-        llama_batch b_final = llama_batch_init(1, 0, 1);
-        b_final.token[0] = t_extra;
-        b_final.pos[0] = n_cur + n_accepted;
-        b_final.n_seq_id[0] = 1;
-        b_final.seq_id[0][0] = 0;
-        b_final.logits[0] = true;
-        b_final.n_tokens = 1;
+        decode_batch.token[0] = t_extra;
+        decode_batch.pos[0] = n_cur + n_accepted;
+        decode_batch.n_tokens = 1;
 
-        if (llama_decode(ctx, b_final) != 0) { llama_batch_free(b_final); break; }
-        if (ctx_draft) llama_decode(ctx_draft, b_final);
+        if (llama_decode(ctx, decode_batch) != 0) { break; }
+        if (ctx_draft) llama_decode(ctx_draft, decode_batch);
 
-        llama_batch_free(b_final);
         n_cur += n_accepted + 1;
     }
+
     onToken(@"__END_OF_STREAM__");
+    llama_batch_free(decode_batch);
     llama_sampler_free(smpl);
 }
 

@@ -44,6 +44,69 @@ class SettingsView extends GetView<SettingsController> {
             ),
           ),
           const SizedBox(height: 24),
+
+          // --- NEW: Hardware Settings Card ---
+          _buildSectionHeader('Hardware Overrides'),
+          Card(
+            color: Colors.grey[900],
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text("CPU Threads", style: TextStyle(fontWeight: FontWeight.bold)),
+                      Text("${controller.nThreads.value}", style: const TextStyle(color: Colors.blueAccent)),
+                    ],
+                  ),
+                  Slider(
+                    value: controller.nThreads.value.toDouble(),
+                    min: 1,
+                    max: 8,
+                    divisions: 7,
+                    activeColor: Colors.blueAccent,
+                    onChanged: (val) => controller.updateHardwareSettings(val.toInt(), controller.nCtx.value),
+                  ),
+                  const SizedBox(height: 16),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text("Context Size", style: TextStyle(fontWeight: FontWeight.bold)),
+                      Text(controller.nCtx.value == 0 ? "Auto (RAM Based)" : "${controller.nCtx.value} tokens", style: const TextStyle(color: Colors.blueAccent)),
+                    ],
+                  ),
+                  Slider(
+                    value: controller.nCtx.value.toDouble(),
+                    min: 0,
+                    max: 16384,
+                    divisions: 8,
+                    activeColor: Colors.blueAccent,
+                    onChanged: (val) {
+                      // Snap to common power-of-2 context sizes
+                      int snappedVal = 0;
+                      if (val > 0 && val <= 3072) snappedVal = 2048;
+                      else if (val > 3072 && val <= 6144) snappedVal = 4096;
+                      else if (val > 6144 && val <= 12288) snappedVal = 8192;
+                      else if (val > 12288) snappedVal = 16384;
+
+                      if (snappedVal != controller.nCtx.value) {
+                        controller.updateHardwareSettings(controller.nThreads.value, snappedVal);
+                      }
+                    },
+                  ),
+                  const Padding(
+                    padding: EdgeInsets.only(top: 8.0),
+                    child: Text("Set to 0 to let the engine auto-calculate limits to prevent crashes.", style: TextStyle(fontSize: 12, color: Colors.white54)),
+                  )
+                ],
+              ),
+            ),
+          ),
+          // -----------------------------------
+
+          const SizedBox(height: 24),
           _buildSectionHeader('Available to Download'),
           ...LlamaService.instance.availableModels.map((m) => _buildModelDownloadCard(m)),
           const SizedBox(height: 24),
@@ -70,7 +133,12 @@ class SettingsView extends GetView<SettingsController> {
           value: currentValue,
           dropdownColor: Colors.blueGrey[900],
           isExpanded: true,
-          decoration: InputDecoration(filled: true, fillColor: Colors.black26, border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none)),
+          decoration: InputDecoration(
+              filled: true,
+              fillColor: Colors.black26,
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+              hintText: "Select a model..."
+          ),
           items: options.map((f) => DropdownMenuItem(value: f.path, child: Text(f.path.split('/').last, overflow: TextOverflow.ellipsis))).toList(),
           onChanged: options.isEmpty ? null : onChanged,
         ),

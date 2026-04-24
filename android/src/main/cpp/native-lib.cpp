@@ -3,6 +3,7 @@
 #include <vector>
 #include <android/log.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include "llama.h"
 #include "ggml-backend.h"
 
@@ -25,12 +26,28 @@ double getPhysicalMemoryGB() {
     return 4.0;
 }
 
+double getFileSizeGB(const char* path) {
+    struct stat stat_buf;
+    int rc = stat(path, &stat_buf);
+    return rc == 0 ? stat_buf.st_size / (1024.0 * 1024.0 * 1024.0) : 0.0;
+}
+
 extern "C" {
 
 JNIEXPORT jboolean JNICALL
-Java_com_timebox_native_1llama_NativeLlamaPlugin_initLlama(JNIEnv *env, jobject thiz, jstring model_path) {
+Java_com_timebox_native_1llama_NativeLlamaPlugin_initLlama(JNIEnv *env, jobject thiz, jstring model_path, jint n_ctx, jint n_threads) {
     const char *path = env->GetStringUTFChars(model_path, nullptr);
     LOGI("Initializing llama model from: %s", path);
+
+    double memoryGB = getPhysicalMemoryGB();
+    double fileSizeGB = getFileSizeGB(path);
+
+    // RAM SHIELD: Prevent OS OOM Kills. Limit model size to ~65% of total RAM.
+    if (fileSizeGB > 0 && fileSizeGB > (memoryGB * 0.65)) {
+        LOGE("RAM SHIELD: Model size (%.2f GB) exceeds safe limits for device RAM (%.2f GB). Aborting load to prevent OS crash.", fileSizeGB, memoryGB);
+        env->ReleaseStringUTFChars(model_path, path);
+        return JNI_FALSE;
+    }
 
     if (ctx) { llama_free(ctx); ctx = nullptr; }
     if (model) { llama_model_free(model); model = nullptr; }
@@ -50,17 +67,20 @@ Java_com_timebox_native_1llama_NativeLlamaPlugin_initLlama(JNIEnv *env, jobject 
     }
 
     auto cparams = llama_context_default_params();
-    cparams.n_threads = 4;
+    cparams.n_threads = n_threads > 0 ? n_threads : 4;
     cparams.embeddings = true;
 
-    double memoryGB = getPhysicalMemoryGB();
-    int32_t dynamic_n_ctx = 4096;
-
-    if (memoryGB >= 7.5) { dynamic_n_ctx = 8192; }
-    if (memoryGB >= 11.5) { dynamic_n_ctx = 16384; }
-
-    cparams.n_ctx = dynamic_n_ctx;
-    LOGI("Device RAM: %.2f GB, Set n_ctx to: %d", memoryGB, dynamic_n_ctx);
+    // Use explicit context size if provided, otherwise auto-calculate
+    if (n_ctx > 0) {
+        cparams.n_ctx = n_ctx;
+        LOGI("Using provided n_ctx: %d", n_ctx);
+    } else {
+        int32_t dynamic_n_ctx = 4096;
+        if (memoryGB >= 7.5) { dynamic_n_ctx = 8192; }
+        if (memoryGB >= 11.5) { dynamic_n_ctx = 16384; }
+        cparams.n_ctx = dynamic_n_ctx;
+        LOGI("Device RAM: %.2f GB, Auto-Set n_ctx to: %d", memoryGB, dynamic_n_ctx);
+    }
 
     ctx = llama_init_from_model(model, cparams);
     if (ctx == nullptr) {
@@ -77,7 +97,7 @@ Java_com_timebox_native_1llama_NativeLlamaPlugin_initLlama(JNIEnv *env, jobject 
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_timebox_native_1llama_NativeLlamaPlugin_initDraftModel(JNIEnv *env, jobject thiz, jstring model_path) {
+Java_com_timebox_native_1llama_NativeLlamaPlugin_initDraftModel(JNIEnv *env, jobject thiz, jstring model_path, jint n_ctx, jint n_threads) {
     const char *path = env->GetStringUTFChars(model_path, nullptr);
 
     if (ctx_draft) { llama_free(ctx_draft); ctx_draft = nullptr; }
@@ -93,14 +113,18 @@ Java_com_timebox_native_1llama_NativeLlamaPlugin_initDraftModel(JNIEnv *env, job
     }
 
     auto cparams = llama_context_default_params();
-    cparams.n_threads = 4;
+    cparams.n_threads = n_threads > 0 ? n_threads : 4;
     cparams.embeddings = true;
 
-    double memoryGB = getPhysicalMemoryGB();
-    int32_t dynamic_n_ctx = 4096;
-    if (memoryGB >= 7.5) dynamic_n_ctx = 8192;
-    if (memoryGB >= 11.5) dynamic_n_ctx = 16384;
-    cparams.n_ctx = dynamic_n_ctx;
+    if (n_ctx > 0) {
+        cparams.n_ctx = n_ctx;
+    } else {
+        double memoryGB = getPhysicalMemoryGB();
+        int32_t dynamic_n_ctx = 4096;
+        if (memoryGB >= 7.5) dynamic_n_ctx = 8192;
+        if (memoryGB >= 11.5) dynamic_n_ctx = 16384;
+        cparams.n_ctx = dynamic_n_ctx;
+    }
 
     ctx_draft = llama_init_from_model(model_draft, cparams);
     if (ctx_draft == nullptr) {
@@ -177,7 +201,7 @@ static bool sendToken(JNIEnv *env, jobject thiz, jmethodID methodID, const struc
 }
 
 JNIEXPORT void JNICALL
-Java_com_timebox_native_1llama_NativeLlamaPlugin_startNativeGeneration(JNIEnv *env, jobject thiz, jobjectArray roles, jobjectArray contents) {
+Java_com_timebox_native_1llama_NativeLlamaPlugin_startNativeGeneration(JNIEnv *env, jobject thiz, jobjectArray roles, jobjectArray contents, jfloat temperature, jint top_k, jfloat top_p) {
 if (ctx == nullptr || model == nullptr) return;
 
 stop_generation = false;
@@ -238,9 +262,9 @@ prompt_tokens.resize(tokenized_count);
 
 auto sparams = llama_sampler_chain_default_params();
 llama_sampler * smpl = llama_sampler_chain_init(sparams);
-llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.7f));
-llama_sampler_chain_add(smpl, llama_sampler_init_top_k(40));
-llama_sampler_chain_add(smpl, llama_sampler_init_top_p(0.9f, 1));
+llama_sampler_chain_add(smpl, llama_sampler_init_temp(temperature));
+llama_sampler_chain_add(smpl, llama_sampler_init_top_k(top_k));
+llama_sampler_chain_add(smpl, llama_sampler_init_top_p(top_p, 1));
 llama_sampler_chain_add(smpl, llama_sampler_init_penalties(128, 1.2f, 0.1f, 0.1f));
 llama_sampler_chain_add(smpl, llama_sampler_init_dist(42));
 
@@ -262,6 +286,9 @@ return;
 
 if (ctx_draft) {
 llama_memory_seq_rm(llama_get_memory(ctx_draft), -1, -1, -1);
+for (int i = 0; i < batch.n_tokens; ++i) {
+batch.logits[i] = (i == batch.n_tokens - 1);
+}
 if (llama_decode(ctx_draft, batch) != 0) {
 llama_free(ctx_draft);
 ctx_draft = nullptr;
@@ -274,6 +301,11 @@ llama_batch_free(batch);
 const uint32_t n_ctx_max = llama_n_ctx(ctx);
 const int n_draft = 5;
 bool is_eog_reached = false;
+
+llama_batch decode_batch = llama_batch_init(1, 0, 1);
+decode_batch.n_seq_id[0] = 1;
+decode_batch.seq_id[0][0] = 0;
+decode_batch.logits[0] = true;
 
 while (true) {
 if (stop_generation || is_eog_reached) break;
@@ -300,15 +332,11 @@ llama_token t = llama_sampler_sample(smpl, ctx_draft, -1);
 llama_sampler_accept(smpl, t);
 draft_tokens.push_back(t);
 
-llama_batch b_draft = llama_batch_init(1, 0, 1);
-b_draft.token[0] = draft_tokens.back();
-b_draft.pos[0] = n_cur + i;
-b_draft.n_seq_id[0] = 1;
-b_draft.seq_id[0][0] = 0;
-b_draft.logits[0] = true;
-b_draft.n_tokens = 1;
-if (llama_decode(ctx_draft, b_draft) != 0) { llama_batch_free(b_draft); break; }
-llama_batch_free(b_draft);
+decode_batch.token[0] = draft_tokens.back();
+decode_batch.pos[0] = n_cur + i;
+decode_batch.n_tokens = 1;
+
+if (llama_decode(ctx_draft, decode_batch) != 0) { break; }
 }
 }
 
@@ -359,18 +387,13 @@ sendToken(env, thiz, methodID, vocab, t_extra, is_eog_reached);
 llama_sampler_accept(smpl, t_extra);
 if (is_eog_reached || llama_vocab_is_eog(vocab, t_extra)) { is_eog_reached = true; break; }
 
-llama_batch b_final = llama_batch_init(1, 0, 1);
-b_final.token[0] = t_extra;
-b_final.pos[0] = n_cur + n_accepted;
-b_final.n_seq_id[0] = 1;
-b_final.seq_id[0][0] = 0;
-b_final.logits[0] = true;
-b_final.n_tokens = 1;
+decode_batch.token[0] = t_extra;
+decode_batch.pos[0] = n_cur + n_accepted;
+decode_batch.n_tokens = 1;
 
-if (llama_decode(ctx, b_final) != 0) { llama_batch_free(b_final); break; }
-if (ctx_draft) llama_decode(ctx_draft, b_final);
+if (llama_decode(ctx, decode_batch) != 0) { break; }
+if (ctx_draft) llama_decode(ctx_draft, decode_batch);
 
-llama_batch_free(b_final);
 n_cur += n_accepted + 1;
 }
 
@@ -378,6 +401,7 @@ jstring eos = env->NewStringUTF("__END_OF_STREAM__");
 env->CallVoidMethod(thiz, methodID, eos);
 env->DeleteLocalRef(eos);
 
+llama_batch_free(decode_batch);
 llama_sampler_free(smpl);
 }
 

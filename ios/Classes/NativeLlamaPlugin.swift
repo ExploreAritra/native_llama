@@ -21,9 +21,13 @@ public class NativeLlamaPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                 result(FlutterError(code: "INVALID_ARGUMENT", message: "Model path is null", details: nil))
                 return
             }
+
+            let nCtx = args["nCtx"] as? Int ?? -1
+            let nThreads = args["nThreads"] as? Int ?? -1
+
             // Move heavy initialization to a background thread
             DispatchQueue.global(qos: .userInitiated).async {
-                let success = LlamaBridge.shared().initModel(modelPath)
+                let success = LlamaBridge.shared().initModel(modelPath, nCtx: Int32(nCtx), nThreads: Int32(nThreads))
                 DispatchQueue.main.async { result(success) }
             }
 
@@ -33,8 +37,12 @@ public class NativeLlamaPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                 result(FlutterError(code: "INVALID_ARGUMENT", message: "Model path is null", details: nil))
                 return
             }
+
+            let nCtx = args["nCtx"] as? Int ?? -1
+            let nThreads = args["nThreads"] as? Int ?? -1
+
             DispatchQueue.global(qos: .userInitiated).async {
-                let success = LlamaBridge.shared().initDraftModel(modelPath)
+                let success = LlamaBridge.shared().initDraftModel(modelPath, nCtx: Int32(nCtx), nThreads: Int32(nThreads))
                 DispatchQueue.main.async { result(success) }
             }
 
@@ -57,11 +65,19 @@ public class NativeLlamaPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                 return
             }
 
+            let temperature = (args["temperature"] as? NSNumber)?.floatValue ?? 0.7
+            let topK = args["topK"] as? Int ?? 40
+            let topP = (args["topP"] as? NSNumber)?.floatValue ?? 0.9
+
             // Prevent screen from sleeping during long generations
             UIApplication.shared.isIdleTimerDisabled = true
 
             DispatchQueue.global(qos: .userInitiated).async {
-                LlamaBridge.shared().startGeneration(withRoles: roles, contents: contents) { [weak self] token in
+                LlamaBridge.shared().startGeneration(withRoles: roles,
+                                                    contents: contents,
+                                                 temperature: temperature,
+                                                        topK: Int32(topK),
+                                                        topP: topP) { [weak self] token in
                     guard let token = token else { return }
                     DispatchQueue.main.async {
                         if token == "__END_OF_STREAM__" {

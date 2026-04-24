@@ -12,13 +12,17 @@ class NativeLlama {
   bool get isDraftInitialized => _isDraftInitialized;
 
   /// Initializes the main base model
-  Future<void> initModel(String absolutePath) async {
+  /// [nCtx] Optional override for context window. If null, calculates based on device RAM.
+  /// [nThreads] Optional override for CPU threads. Defaults to 4.
+  Future<void> initModel(String absolutePath, {int? nCtx, int? nThreads}) async {
     try {
       final bool result = await _methodChannel.invokeMethod('initModel', {
         'modelPath': absolutePath,
+        'nCtx': nCtx,
+        'nThreads': nThreads,
       });
       _isInitialized = result;
-      if (!result) throw Exception("Native initialization failed for base model.");
+      if (!result) throw Exception("Native initialization failed. The model may be too large for this device's memory.");
     } on PlatformException catch (e) {
       _isInitialized = false;
       throw Exception("Platform Exception during init: ${e.message}");
@@ -26,10 +30,12 @@ class NativeLlama {
   }
 
   /// Initializes the draft model for speculative decoding
-  Future<void> initDraftModel(String absolutePath) async {
+  Future<void> initDraftModel(String absolutePath, {int? nCtx, int? nThreads}) async {
     try {
       final bool result = await _methodChannel.invokeMethod('initDraftModel', {
         'modelPath': absolutePath,
+        'nCtx': nCtx,
+        'nThreads': nThreads,
       });
       _isDraftInitialized = result;
       if (!result) throw Exception("Native initialization failed for draft model.");
@@ -54,7 +60,12 @@ class NativeLlama {
   }
 
   /// Generates response and streams tokens back to the UI
-  Stream<String> generateResponse(List<Map<String, String>> messages) {
+  Stream<String> generateResponse(
+      List<Map<String, String>> messages, {
+        double temperature = 0.7,
+        int topK = 40,
+        double topP = 0.9,
+      }) {
     if (!_isInitialized) {
       return Stream.error("Model not initialized");
     }
@@ -82,6 +93,9 @@ class NativeLlama {
       _methodChannel.invokeMethod('startGeneration', {
         'roles': roles,
         'contents': contents,
+        'temperature': temperature,
+        'topK': topK,
+        'topP': topP,
       }).catchError((e) {
         controller.addError(e);
       });

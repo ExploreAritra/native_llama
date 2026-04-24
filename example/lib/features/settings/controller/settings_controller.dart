@@ -22,6 +22,11 @@ class SettingsController extends GetxController {
   var downloadProgress = 0.0.obs;
   var currentDownloadingModel = "".obs;
 
+  // --- NEW: Hardware Control Observables ---
+  var nThreads = 4.obs;
+  var nCtx = 0.obs; // 0 = Auto-calculate based on RAM
+  // -----------------------------------------
+
   List<File> get mainModels => downloadedModels
       .where((f) => f.existsSync() && f.lengthSync() > 1024 * 1024 * 500)
       .toList();
@@ -37,7 +42,6 @@ class SettingsController extends GetxController {
   void onInit() {
     super.onInit();
     _loadSettings();
-    _refreshDownloadedModels();
     _setupDownloadListener();
     _checkRunningTasks();
   }
@@ -54,13 +58,7 @@ class SettingsController extends GetxController {
 
         Get.snackbar("Importing", "Copying model to app storage...");
         final newPath = await _llamaService.importModel(path);
-        await _refreshDownloadedModels();
-
-        if (File(newPath).lengthSync() > 1024 * 1024 * 500) {
-          await loadModel(newPath);
-        } else {
-          await loadDraftModel(newPath);
-        }
+        await _refreshDownloadedModels(); // Will auto-load if slots are empty
       }
     } catch (e) {
       Get.snackbar("Error", "Failed to import model: $e");
@@ -89,8 +87,8 @@ class SettingsController extends GetxController {
         if (status == DownloadTaskStatus.complete) {
           isDownloading.value = false;
           _activeTaskId = null;
-          _refreshDownloadedModels();
           Get.snackbar("Success", "Model downloaded successfully");
+          _refreshDownloadedModels(); // Triggers auto-select
         } else if (status == DownloadTaskStatus.failed || status == DownloadTaskStatus.canceled) {
           isDownloading.value = false;
           _activeTaskId = null;
@@ -136,58 +134,119 @@ class SettingsController extends GetxController {
 
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
+
+    // Load saved hardware overrides
+    nThreads.value = prefs.getInt('nThreads') ?? 4;
+    nCtx.value = prefs.getInt('nCtx') ?? 0;
+
     String savedPath = prefs.getString('selected_model_path') ?? "";
     String savedDraftPath = prefs.getString('selected_draft_model_path') ?? "";
 
+    bool attemptedMainLoad = false;
     if (savedPath.isNotEmpty && File(savedPath).existsSync()) {
-      selectedModelPath.value = savedPath;
-      try {
-        await _llamaService.initModel(savedPath);
-        isModelLoaded.value = _llamaService.isInitialized;
-      } catch (_) { isModelLoaded.value = false; }
+      attemptedMainLoad = true;
+      await loadModel(savedPath);
     }
 
+    bool attemptedDraftLoad = false;
     if (savedDraftPath.isNotEmpty && File(savedDraftPath).existsSync()) {
-      selectedDraftModelPath.value = savedDraftPath;
-      try {
-        await _llamaService.initDraftModel(savedDraftPath);
-        isDraftModelLoaded.value = _llamaService.isDraftInitialized;
-      } catch (_) { isDraftModelLoaded.value = false; }
+      attemptedDraftLoad = true;
+      await loadDraftModel(savedDraftPath);
+    }
+
+    // Refresh files and auto-select if nothing was loaded
+    await _refreshDownloadedModels(autoSelectMain: !attemptedMainLoad, autoSelectDraft: !attemptedDraftLoad);
+  }
+
+  Future<void> _refreshDownloadedModels({bool autoSelectMain = true, bool autoSelectDraft = true}) async {
+    downloadedModels.value = await _llamaService.getDownloadedModels();
+
+    // --- AUTO-SELECT LOGIC ---
+    if (autoSelectMain && selectedModelPath.value.isEmpty && mainModels.isNotEmpty) {
+      await loadModel(mainModels.first.path);
+    }
+
+    if (autoSelectDraft && selectedDraftModelPath.value.isEmpty && draftModels.isNotEmpty) {
+      await loadDraftModel(draftModels.first.path);
     }
   }
 
-  Future<void> _refreshDownloadedModels() async {
-    downloadedModels.value = await _llamaService.getDownloadedModels();
+  // Updates hardware settings and re-initializes models if needed
+  Future<void> updateHardwareSettings(int threads, int contextSize) async {
+    nThreads.value = threads;
+    nCtx.value = contextSize;
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('nThreads', threads);
+    await prefs.setInt('nCtx', contextSize);
+
+    // Reload active models to apply new settings
+    if (selectedModelPath.value.isNotEmpty) {
+      await loadModel(selectedModelPath.value);
+    }
+    if (selectedDraftModelPath.value.isNotEmpty) {
+      await loadDraftModel(selectedDraftModelPath.value);
+    }
   }
 
   Future<void> loadModel(String path) async {
     try {
-      Get.snackbar("Loading", "Initializing Main Model...");
-      await _llamaService.initModel(path);
+      Get.snackbar("Loading", "Initializing Main Engine...");
+
+      // Pass the dynamic settings to the C++ bridge
+      await _llamaService.initModel(
+          path,
+          nCtx: nCtx.value > 0 ? nCtx.value : null,
+          nThreads: nThreads.value
+      );
+
       isModelLoaded.value = _llamaService.isInitialized;
       if (isModelLoaded.value) {
         selectedModelPath.value = path;
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString('selected_model_path', path);
+        Get.snackbar("Ready", "Main Model Initialized successfully.", backgroundColor: Colors.green.withOpacity(0.5));
       }
-    } catch (e) { Get.snackbar("Error", "Failed to load model"); }
+    } catch (e) {
+      isModelLoaded.value = false;
+      selectedModelPath.value = "";
+      // Catching the RAM Shield exception from NativeLlama
+      Get.snackbar("Initialization Failed", e.toString().replaceAll("Exception: ", ""),
+          backgroundColor: Colors.redAccent,
+          duration: const Duration(seconds: 5),
+          snackPosition: SnackPosition.BOTTOM
+      );
+    }
   }
 
   Future<void> loadDraftModel(String path) async {
     try {
-      Get.snackbar("Loading", "Initializing Draft Model...");
-      await _llamaService.initDraftModel(path);
+      Get.snackbar("Loading", "Initializing Draft Engine...");
+
+      await _llamaService.initDraftModel(
+          path,
+          nCtx: nCtx.value > 0 ? nCtx.value : null,
+          nThreads: nThreads.value
+      );
+
       isDraftModelLoaded.value = _llamaService.isDraftInitialized;
       if (isDraftModelLoaded.value) {
         selectedDraftModelPath.value = path;
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString('selected_draft_model_path', path);
+        Get.snackbar("Ready", "Draft Model Initialized successfully.", backgroundColor: Colors.green.withOpacity(0.5));
       }
-    } catch (e) { Get.snackbar("Error", "Failed to load draft model"); }
+    } catch (e) {
+      isDraftModelLoaded.value = false;
+      selectedDraftModelPath.value = "";
+      Get.snackbar("Initialization Failed", e.toString().replaceAll("Exception: ", ""),
+          backgroundColor: Colors.orangeAccent,
+          snackPosition: SnackPosition.BOTTOM
+      );
+    }
   }
 
   Future<void> deleteModel(File file) async {
-    // 1. Optimistically remove from the UI immediately
     downloadedModels.removeWhere((f) => f.path == file.path);
 
     if (selectedModelPath.value == file.path) {
@@ -203,12 +262,9 @@ class SettingsController extends GetxController {
       (await SharedPreferences.getInstance()).remove('selected_draft_model_path');
     }
 
-    // 2. Delete from physical storage
     if (file.existsSync()) {
       await file.delete();
     }
-
-    // 3. Final sync just to be safe
-    await _refreshDownloadedModels();
+    await _refreshDownloadedModels(autoSelectMain: false, autoSelectDraft: false);
   }
 }

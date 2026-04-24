@@ -171,6 +171,7 @@ class ChatMessage {
             .replaceAll('<final_answer>', '')
             .replaceAll('</final_answer>', '')
             .replaceAll('<turn|>', '')
+            .replaceAll('<channel|>', '')
             .trim();
   }
 

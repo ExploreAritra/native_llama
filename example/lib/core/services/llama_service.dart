@@ -48,20 +48,33 @@ class LlamaService {
     ),
   ];
 
-  Future<void> initModel(String path) async {
-    await plugin.initModel(await _getTruePath(path));
+  // ADDED: Optional nCtx and nThreads overrides
+  Future<void> initModel(String path, {int? nCtx, int? nThreads}) async {
+    await plugin.initModel(await _getTruePath(path), nCtx: nCtx, nThreads: nThreads);
   }
 
-  Future<void> initDraftModel(String path) async {
-    await plugin.initDraftModel(await _getTruePath(path));
+  // ADDED: Optional nCtx and nThreads overrides
+  Future<void> initDraftModel(String path, {int? nCtx, int? nThreads}) async {
+    await plugin.initDraftModel(await _getTruePath(path), nCtx: nCtx, nThreads: nThreads);
   }
 
   Future<List<double>> getEmbedding(String text) async {
     return await plugin.getEmbedding(text);
   }
 
-  Stream<String> generateResponse(List<Map<String, String>> messages) {
-    return plugin.generateResponse(messages);
+  // ADDED: Sampler controls exposed
+  Stream<String> generateResponse(
+      List<Map<String, String>> messages, {
+        double temperature = 0.7,
+        int topK = 40,
+        double topP = 0.9,
+      }) {
+    return plugin.generateResponse(
+      messages,
+      temperature: temperature,
+      topK: topK,
+      topP: topP,
+    );
   }
 
   Future<void> abortGeneration() async {

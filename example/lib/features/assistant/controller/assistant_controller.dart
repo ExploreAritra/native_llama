@@ -16,6 +16,12 @@ class AssistantController extends GetxController {
   var isThinkingEnabled = true.obs;
   final ScrollController scrollController = ScrollController();
 
+  // --- NEW: Fine-grained sampler controls exposed to UI ---
+  var temperature = 0.7.obs;
+  var topK = 40.obs;
+  var topP = 0.9.obs;
+  // --------------------------------------------------------
+
   @override
   void onInit() {
     super.onInit();
@@ -30,11 +36,13 @@ class AssistantController extends GetxController {
   void scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (scrollController.hasClients) {
-        scrollController.animateTo(scrollController.position.maxScrollExtent, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+        scrollController.animateTo(
+            scrollController.position.maxScrollExtent,
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOut);
       }
     });
   }
-
 
   void sendMessage(String text) async {
     if (text.isEmpty) return;
@@ -67,12 +75,6 @@ class AssistantController extends GetxController {
       return;
     }
 
-    if (!_llamaService.isInitialized) {
-      messages.add(ChatMessage(sessionId: sessionId, role: "assistant", content: "Model not initialized.", createdAt: DateTime.now()));
-      isTyping.value = false;
-      return;
-    }
-
     final assistantIndex = messages.length;
     messages.add(ChatMessage(
       sessionId: sessionId,
@@ -99,16 +101,24 @@ class AssistantController extends GetxController {
 
     String fullResponse = "";
     try {
-      await for (final token in _llamaService.generateResponse(chatHistory)) {
+      // --- NEW: Passing the dynamic controls to the LlamaService ---
+      await for (final token in _llamaService.generateResponse(
+        chatHistory,
+        temperature: temperature.value,
+        topK: topK.value,
+        topP: topP.value,
+      )) {
         fullResponse += token;
         messages[assistantIndex].updateContent(fullResponse);
         messages.refresh();
         scrollToBottom();
       }
+
       messages[assistantIndex].updateContent(fullResponse, isFinalized: true);
       messages.refresh();
       await _dbService.saveChatMessage(sessionId, "assistant", fullResponse);
       await _cacheService.cacheResponse(text, fullResponse);
+
     } catch (e) {
       messages[assistantIndex].updateContent("Error: $e");
     } finally {
