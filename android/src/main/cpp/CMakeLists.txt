@@ -7,9 +7,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Optimization and defines
 add_compile_options(-O3 -fexceptions -frtti)
 
-# --- Enable Vulkan for Android GPU Acceleration ---
+# --- Configuration for llama.cpp ---
 set(GGML_VULKAN ON CACHE BOOL "Enable Vulkan" FORCE)
 set(GGML_VULKAN_PERF_FA OFF CACHE BOOL "Disable Flash Attention" FORCE)
+
+# Disable unnecessary heavy builds from the fetched repo
+set(LLAMA_BUILD_TESTS OFF CACHE BOOL "Disable tests" FORCE)
+set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "Disable examples" FORCE)
+set(LLAMA_BUILD_SERVER OFF CACHE BOOL "Disable server" FORCE)
 
 # --- Force compiler to ignore hardware audio frameworks ---
 add_definitions(-DMA_NO_OPENSL=1)
@@ -17,34 +22,33 @@ add_definitions(-DMA_NO_AAUDIO=1)
 add_definitions(-DMA_NO_AVFOUNDATION=1)
 add_definitions(-DMA_NO_COREAUDIO=1)
 
-# --- Fetch Vulkan & SPIR-V C++ Headers ---
 include(FetchContent)
 
-FetchContent_Declare(
-    VulkanHeaders
-    GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
-    GIT_TAG        main
-)
+# 1. Fetch Vulkan Headers
+FetchContent_Declare(VulkanHeaders GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git GIT_TAG main)
 FetchContent_MakeAvailable(VulkanHeaders)
 
-FetchContent_Declare(
-    SPIRVHeaders
-    GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Headers.git
-    GIT_TAG        main
-)
+# 2. Fetch SPIR-V Headers
+FetchContent_Declare(SPIRVHeaders GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Headers.git GIT_TAG main)
 FetchContent_MakeAvailable(SPIRVHeaders)
-# ------------------------------------------------------
 
-set(SHARED_CPP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../shared_cpp")
+# 3. CRITICAL FIX: Fetch llama.cpp directly from GitHub!
+FetchContent_Declare(
+    llama_cpp
+    GIT_REPOSITORY https://github.com/ggerganov/llama.cpp.git
+    GIT_TAG        master # Note: You can lock this to a specific commit hash for absolute stability
+)
+FetchContent_MakeAvailable(llama_cpp)
 
-include_directories(
+# Apply Vulkan headers to the downloaded target
+target_include_directories(ggml-vulkan PRIVATE
     "${vulkanheaders_SOURCE_DIR}/include"
     "${spirvheaders_SOURCE_DIR}/include"
 )
 
-# --- Let the official llama.cpp CMake system handle its own build ---
-add_subdirectory("${SHARED_CPP_DIR}" llama_cpp_build)
+set(SHARED_CPP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../shared_cpp")
 
+# Grab all your custom MTMD model files
 file(GLOB MTMD_MODEL_SRCS "${SHARED_CPP_DIR}/tools/mtmd/models/*.cpp")
 
 # Add our custom bridge files
@@ -60,16 +64,18 @@ add_library(native_llama SHARED
     ${MTMD_MODEL_SRCS}
 )
 
+# Explicitly specify include directories directly from the fetched source and local mtmd
 target_include_directories(native_llama PRIVATE
     .
-    "${SHARED_CPP_DIR}/include"
-    "${SHARED_CPP_DIR}/common"
-    "${SHARED_CPP_DIR}/src"
-    "${SHARED_CPP_DIR}/ggml/include"
+    "${llama_cpp_SOURCE_DIR}/include"
+    "${llama_cpp_SOURCE_DIR}/common"
+    "${llama_cpp_SOURCE_DIR}/src"
+    "${llama_cpp_SOURCE_DIR}/ggml/include"
+    "${llama_cpp_SOURCE_DIR}/ggml/src"
     "${SHARED_CPP_DIR}/tools/mtmd"
     "${SHARED_CPP_DIR}/vendor"
 )
 
 find_library(log-lib log)
-# CRITICAL FIX: Add vulkan back to the linker so dynamic loading can find libvulkan.so
+# Link against the fetched llama library
 target_link_libraries(native_llama llama dl vulkan ${log-lib})

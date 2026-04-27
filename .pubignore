@@ -1,19 +1,20 @@
-# Ignore Desktop/Web Hardware Backends
-shared_cpp/ggml/src/ggml-cuda/
-shared_cpp/ggml/src/ggml-sycl/
-shared_cpp/ggml/src/ggml-hexagon/
-shared_cpp/ggml/src/ggml-musa/
-shared_cpp/ggml/src/ggml-webgpu/
-shared_cpp/ggml/src/ggml-opencl/
-shared_cpp/ggml/src/ggml-openvino/
+# Strip upstream llama.cpp source (will be fetched dynamically via CMake)
+shared_cpp/ggml/
+shared_cpp/src/
+shared_cpp/include/
+shared_cpp/common/
+shared_cpp/examples/
+shared_cpp/tests/
 
 # Ignore Test Assets
 shared_cpp/tools/mtmd/test-1.jpeg
 shared_cpp/tools/mtmd/test-2.mp3
 shared_cpp/tools/mtmd/tests/
 
-# Ensure all example build artifacts are stripped
+# Ensure all massive example build artifacts are stripped
 example/build/
 example/ios/build/
+example/ios/Pods/
 example/android/app/build/
 example/android/.cxx/
+example/android/.gradle/
