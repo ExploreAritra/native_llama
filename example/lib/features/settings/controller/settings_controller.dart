@@ -15,24 +15,36 @@ class SettingsController extends GetxController {
   var downloadedModels = <File>[].obs;
   var selectedModelPath = "".obs;
   var selectedDraftModelPath = "".obs;
+  var selectedVisionModelPath = "".obs; // --- NEW: Vision Model Path ---
+
   var isModelLoaded = false.obs;
   var isDraftModelLoaded = false.obs;
+  var isVisionModelLoaded = false.obs;  // --- NEW: Vision Loaded State ---
 
   var isDownloading = false.obs;
   var downloadProgress = 0.0.obs;
   var currentDownloadingModel = "".obs;
 
-  // --- NEW: Hardware Control Observables ---
   var nThreads = 4.obs;
-  var nCtx = 0.obs; // 0 = Auto-calculate based on RAM
-  // -----------------------------------------
+  var nCtx = 0.obs;
+  var nGpuLayers = 0.obs; // 0 for CPU, > 0 for partial GPU, -1 for full GPU
+  var useGpu = false.obs;
 
+  var maxCores = 8.obs;
+  var performanceCores = 4.obs;
+
+  // --- MODIFIED: Filter out mmproj files from main text models ---
   List<File> get mainModels => downloadedModels
-      .where((f) => f.existsSync() && f.lengthSync() > 1024 * 1024 * 500)
+      .where((f) => f.existsSync() && f.lengthSync() > 1024 * 1024 * 500 && !f.path.toLowerCase().contains('mmproj'))
       .toList();
 
   List<File> get draftModels => downloadedModels
-      .where((f) => f.existsSync() && f.lengthSync() <= 1024 * 1024 * 500)
+      .where((f) => f.existsSync() && f.lengthSync() <= 1024 * 1024 * 500 && !f.path.toLowerCase().contains('mmproj'))
+      .toList();
+
+  // --- NEW: Vision Models Getter ---
+  List<File> get visionModels => downloadedModels
+      .where((f) => f.existsSync() && f.path.toLowerCase().contains('mmproj'))
       .toList();
 
   final ReceivePort _port = ReceivePort();
@@ -44,6 +56,18 @@ class SettingsController extends GetxController {
     _loadSettings();
     _setupDownloadListener();
     _checkRunningTasks();
+    _detectCores();
+  }
+
+  Future<void> _detectCores() async {
+    maxCores.value = await _llamaService.getCpuCores(performanceOnly: false);
+    performanceCores.value = await _llamaService.getCpuCores(performanceOnly: true);
+
+    // If threads not set, default to performance cores
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getInt('nThreads') == null) {
+      nThreads.value = performanceCores.value;
+    }
   }
 
   Future<void> importModelFile() async {
@@ -58,7 +82,7 @@ class SettingsController extends GetxController {
 
         Get.snackbar("Importing", "Copying model to app storage...");
         final newPath = await _llamaService.importModel(path);
-        await _refreshDownloadedModels(); // Will auto-load if slots are empty
+        await _refreshDownloadedModels();
       }
     } catch (e) {
       Get.snackbar("Error", "Failed to import model: $e");
@@ -88,7 +112,7 @@ class SettingsController extends GetxController {
           isDownloading.value = false;
           _activeTaskId = null;
           Get.snackbar("Success", "Model downloaded successfully");
-          _refreshDownloadedModels(); // Triggers auto-select
+          _refreshDownloadedModels();
         } else if (status == DownloadTaskStatus.failed || status == DownloadTaskStatus.canceled) {
           isDownloading.value = false;
           _activeTaskId = null;
@@ -135,12 +159,14 @@ class SettingsController extends GetxController {
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
 
-    // Load saved hardware overrides
     nThreads.value = prefs.getInt('nThreads') ?? 4;
     nCtx.value = prefs.getInt('nCtx') ?? 0;
+    nGpuLayers.value = prefs.getInt('nGpuLayers') ?? 0;
+    useGpu.value = prefs.getBool('useGpu') ?? false;
 
     String savedPath = prefs.getString('selected_model_path') ?? "";
     String savedDraftPath = prefs.getString('selected_draft_model_path') ?? "";
+    String savedVisionPath = prefs.getString('selected_vision_model_path') ?? ""; // --- NEW ---
 
     bool attemptedMainLoad = false;
     if (savedPath.isNotEmpty && File(savedPath).existsSync()) {
@@ -154,14 +180,22 @@ class SettingsController extends GetxController {
       await loadDraftModel(savedDraftPath);
     }
 
-    // Refresh files and auto-select if nothing was loaded
-    await _refreshDownloadedModels(autoSelectMain: !attemptedMainLoad, autoSelectDraft: !attemptedDraftLoad);
+    bool attemptedVisionLoad = false;
+    if (savedVisionPath.isNotEmpty && File(savedVisionPath).existsSync()) {
+      attemptedVisionLoad = true;
+      await loadVisionModel(savedVisionPath);
+    }
+
+    await _refreshDownloadedModels(
+        autoSelectMain: !attemptedMainLoad,
+        autoSelectDraft: !attemptedDraftLoad,
+        autoSelectVision: !attemptedVisionLoad
+    );
   }
 
-  Future<void> _refreshDownloadedModels({bool autoSelectMain = true, bool autoSelectDraft = true}) async {
+  Future<void> _refreshDownloadedModels({bool autoSelectMain = true, bool autoSelectDraft = true, bool autoSelectVision = true}) async {
     downloadedModels.value = await _llamaService.getDownloadedModels();
 
-    // --- AUTO-SELECT LOGIC ---
     if (autoSelectMain && selectedModelPath.value.isEmpty && mainModels.isNotEmpty) {
       await loadModel(mainModels.first.path);
     }
@@ -169,38 +203,48 @@ class SettingsController extends GetxController {
     if (autoSelectDraft && selectedDraftModelPath.value.isEmpty && draftModels.isNotEmpty) {
       await loadDraftModel(draftModels.first.path);
     }
+
+    if (autoSelectVision && selectedVisionModelPath.value.isEmpty && visionModels.isNotEmpty) {
+      await loadVisionModel(visionModels.first.path);
+    }
   }
 
-  // Updates hardware settings and re-initializes models if needed
-  Future<void> updateHardwareSettings(int threads, int contextSize) async {
+  void updateHardwareSettings(int threads, int contextSize, int gpuLayers, bool gpuEnabled) {
     nThreads.value = threads;
     nCtx.value = contextSize;
+    nGpuLayers.value = gpuLayers;
+    useGpu.value = gpuEnabled;
+  }
 
+  Future<void> applyHardwareSettings() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt('nThreads', threads);
-    await prefs.setInt('nCtx', contextSize);
+    await prefs.setInt('nThreads', nThreads.value);
+    await prefs.setInt('nCtx', nCtx.value);
+    await prefs.setInt('nGpuLayers', nGpuLayers.value);
+    await prefs.setBool('useGpu', useGpu.value);
 
-    // Reload active models to apply new settings
+    // Reload all currently loaded models with new hardware settings
     if (selectedModelPath.value.isNotEmpty) {
       await loadModel(selectedModelPath.value);
     }
     if (selectedDraftModelPath.value.isNotEmpty) {
       await loadDraftModel(selectedDraftModelPath.value);
     }
+    if (selectedVisionModelPath.value.isNotEmpty) {
+      await loadVisionModel(selectedVisionModelPath.value);
+    }
   }
 
   Future<void> loadModel(String path) async {
     try {
       Get.snackbar("Loading", "Initializing Main Engine...");
-
-      // Pass the dynamic settings to the C++ bridge
       await _llamaService.initModel(
           path,
           nCtx: nCtx.value > 0 ? nCtx.value : null,
-          nThreads: nThreads.value
+          nThreads: nThreads.value,
+          nGpuLayers: useGpu.value ? (nGpuLayers.value == 0 ? 10 : nGpuLayers.value) : 0
       );
-
-      isModelLoaded.value = _llamaService.isInitialized;
+      isModelLoaded.value = _llamaService.isInitialized.value;
       if (isModelLoaded.value) {
         selectedModelPath.value = path;
         final prefs = await SharedPreferences.getInstance();
@@ -210,7 +254,6 @@ class SettingsController extends GetxController {
     } catch (e) {
       isModelLoaded.value = false;
       selectedModelPath.value = "";
-      // Catching the RAM Shield exception from NativeLlama
       Get.snackbar("Initialization Failed", e.toString().replaceAll("Exception: ", ""),
           backgroundColor: Colors.redAccent,
           duration: const Duration(seconds: 5),
@@ -222,14 +265,13 @@ class SettingsController extends GetxController {
   Future<void> loadDraftModel(String path) async {
     try {
       Get.snackbar("Loading", "Initializing Draft Engine...");
-
       await _llamaService.initDraftModel(
           path,
           nCtx: nCtx.value > 0 ? nCtx.value : null,
-          nThreads: nThreads.value
+          nThreads: nThreads.value,
+          nGpuLayers: useGpu.value ? (nGpuLayers.value == 0 ? 10 : nGpuLayers.value) : 0
       );
-
-      isDraftModelLoaded.value = _llamaService.isDraftInitialized;
+      isDraftModelLoaded.value = _llamaService.isDraftInitialized.value;
       if (isDraftModelLoaded.value) {
         selectedDraftModelPath.value = path;
         final prefs = await SharedPreferences.getInstance();
@@ -241,6 +283,28 @@ class SettingsController extends GetxController {
       selectedDraftModelPath.value = "";
       Get.snackbar("Initialization Failed", e.toString().replaceAll("Exception: ", ""),
           backgroundColor: Colors.orangeAccent,
+          snackPosition: SnackPosition.BOTTOM
+      );
+    }
+  }
+
+  // --- NEW: Load Vision Model ---
+  Future<void> loadVisionModel(String path) async {
+    try {
+      Get.snackbar("Loading", "Initializing Vision Projector...");
+      await _llamaService.initVision(path);
+      isVisionModelLoaded.value = _llamaService.isVisionInitialized.value;
+      if (isVisionModelLoaded.value) {
+        selectedVisionModelPath.value = path;
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('selected_vision_model_path', path);
+        Get.snackbar("Ready", "Vision Model Initialized successfully.", backgroundColor: Colors.green.withOpacity(0.5));
+      }
+    } catch (e) {
+      isVisionModelLoaded.value = false;
+      selectedVisionModelPath.value = "";
+      Get.snackbar("Initialization Failed", e.toString().replaceAll("Exception: ", ""),
+          backgroundColor: Colors.purpleAccent,
           snackPosition: SnackPosition.BOTTOM
       );
     }
@@ -262,9 +326,15 @@ class SettingsController extends GetxController {
       (await SharedPreferences.getInstance()).remove('selected_draft_model_path');
     }
 
+    if (selectedVisionModelPath.value == file.path) {
+      isVisionModelLoaded.value = false;
+      selectedVisionModelPath.value = "";
+      (await SharedPreferences.getInstance()).remove('selected_vision_model_path');
+    }
+
     if (file.existsSync()) {
       await file.delete();
     }
-    await _refreshDownloadedModels(autoSelectMain: false, autoSelectDraft: false);
+    await _refreshDownloadedModels(autoSelectMain: false, autoSelectDraft: false, autoSelectVision: false);
   }
 }

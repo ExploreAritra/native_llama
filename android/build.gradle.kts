@@ -52,7 +52,7 @@ android {
     }
 
     defaultConfig {
-        minSdk = 24
+        minSdk = 28
 
         // 2. Transferred ABI filters to keep the plugin AAR size small
         ndk {
@@ -63,7 +63,16 @@ android {
 
         externalNativeBuild {
             cmake {
-                cppFlags("-std=c++17")
+                cppFlags(
+                    "-std=c++17",
+                    "-DGGML_USE_VULKAN=1",
+                    "-DGGML_VULKAN_PERF_FA=0"
+                )
+
+                arguments(
+                    "-DGGML_USE_VULKAN=1",
+                    "-DGGML_VULKAN_PERF_FA=0"
+                )
             }
         }
     }

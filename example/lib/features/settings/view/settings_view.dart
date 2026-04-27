@@ -39,13 +39,19 @@ class SettingsView extends GetView<SettingsController> {
                     options: controller.draftModels,
                     onChanged: (p) => controller.loadDraftModel(p!),
                   ),
+                  const Divider(height: 32, color: Colors.white10),
+                  _buildModelDropdown(
+                    label: "Vision Projector (MMPROJ)", icon: Icons.visibility,
+                    value: controller.selectedVisionModelPath.value,
+                    options: controller.visionModels,
+                    onChanged: (p) => controller.loadVisionModel(p!),
+                  ),
                 ],
               ),
             ),
           ),
           const SizedBox(height: 24),
 
-          // --- NEW: Hardware Settings Card ---
           _buildSectionHeader('Hardware Overrides'),
           Card(
             color: Colors.grey[900],
@@ -57,6 +63,53 @@ class SettingsView extends GetView<SettingsController> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
+                      const Text("GPU Inference (Vulkan)", style: TextStyle(fontWeight: FontWeight.bold)),
+                      Switch(
+                        value: controller.useGpu.value,
+                        onChanged: (val) => controller.updateHardwareSettings(
+                            controller.nThreads.value,
+                            controller.nCtx.value,
+                            controller.nGpuLayers.value,
+                            val
+                        ),
+                        activeColor: Colors.blueAccent,
+                      ),
+                    ],
+                  ),
+                  if (controller.useGpu.value) ...[
+                    const SizedBox(height: 8),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text("GPU Layers", style: TextStyle(fontSize: 14)),
+                        Text(controller.nGpuLayers.value == -1 ? "Max (Full Offload)" : "${controller.nGpuLayers.value}",
+                            style: const TextStyle(color: Colors.blueAccent)),
+                      ],
+                    ),
+                    Slider(
+                      value: controller.nGpuLayers.value == -1 ? 99 : controller.nGpuLayers.value.toDouble(),
+                      min: 0,
+                      max: 99,
+                      divisions: 99,
+                      activeColor: Colors.blueAccent,
+                      onChanged: (val) {
+                        int layers = val.toInt();
+                        if (layers >= 99) layers = -1;
+                        controller.updateHardwareSettings(
+                            controller.nThreads.value,
+                            controller.nCtx.value,
+                            layers,
+                            controller.useGpu.value
+                        );
+                      },
+                    ),
+                    const Text("Caution: High values may crash mobile GPUs.",
+                        style: TextStyle(fontSize: 11, color: Colors.orangeAccent)),
+                    const SizedBox(height: 16),
+                  ],
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
                       const Text("CPU Threads", style: TextStyle(fontWeight: FontWeight.bold)),
                       Text("${controller.nThreads.value}", style: const TextStyle(color: Colors.blueAccent)),
                     ],
@@ -64,10 +117,15 @@ class SettingsView extends GetView<SettingsController> {
                   Slider(
                     value: controller.nThreads.value.toDouble(),
                     min: 1,
-                    max: 8,
-                    divisions: 7,
+                    max: 16,
+                    divisions: 15,
                     activeColor: Colors.blueAccent,
-                    onChanged: (val) => controller.updateHardwareSettings(val.toInt(), controller.nCtx.value),
+                    onChanged: (val) => controller.updateHardwareSettings(
+                        val.toInt(),
+                        controller.nCtx.value,
+                        controller.nGpuLayers.value,
+                        controller.useGpu.value
+                    ),
                   ),
                   const SizedBox(height: 16),
                   Row(
@@ -84,7 +142,6 @@ class SettingsView extends GetView<SettingsController> {
                     divisions: 8,
                     activeColor: Colors.blueAccent,
                     onChanged: (val) {
-                      // Snap to common power-of-2 context sizes
                       int snappedVal = 0;
                       if (val > 0 && val <= 3072) snappedVal = 2048;
                       else if (val > 3072 && val <= 6144) snappedVal = 4096;
@@ -92,19 +149,38 @@ class SettingsView extends GetView<SettingsController> {
                       else if (val > 12288) snappedVal = 16384;
 
                       if (snappedVal != controller.nCtx.value) {
-                        controller.updateHardwareSettings(controller.nThreads.value, snappedVal);
+                        controller.updateHardwareSettings(
+                            controller.nThreads.value,
+                            snappedVal,
+                            controller.nGpuLayers.value,
+                            controller.useGpu.value
+                        );
                       }
                     },
                   ),
                   const Padding(
                     padding: EdgeInsets.only(top: 8.0),
                     child: Text("Set to 0 to let the engine auto-calculate limits to prevent crashes.", style: TextStyle(fontSize: 12, color: Colors.white54)),
-                  )
+                  ),
+                  const SizedBox(height: 24),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: controller.applyHardwareSettings,
+                      icon: const Icon(Icons.sync),
+                      label: const Text("Apply & Reload Models"),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blueAccent,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: StadiumBorder(side: BorderSide.none),
+                      ),
+                    ),
+                  ),
                 ],
               ),
             ),
           ),
-          // -----------------------------------
 
           const SizedBox(height: 24),
           _buildSectionHeader('Available to Download'),

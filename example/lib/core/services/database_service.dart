@@ -34,9 +34,19 @@ class DatabaseService {
         role TEXT NOT NULL,
         content TEXT NOT NULL,
         createdAt TEXT NOT NULL,
+        mediaPaths TEXT,
+        mediaType TEXT,
         FOREIGN KEY (sessionId) REFERENCES chat_sessions (id) ON DELETE CASCADE
       )
     ''');
+
+    // Simple migration: Check if mediaPaths column exists, if not add it
+    final columns = db.select("PRAGMA table_info(chat_messages)");
+    bool hasMediaPaths = columns.any((column) => column['name'] == 'mediaPaths');
+    if (!hasMediaPaths) {
+      db.execute("ALTER TABLE chat_messages ADD COLUMN mediaPaths TEXT");
+      db.execute("ALTER TABLE chat_messages ADD COLUMN mediaType TEXT");
+    }
 
     db.execute('''
       CREATE TABLE IF NOT EXISTS semantic_cache (
@@ -87,16 +97,31 @@ class DatabaseService {
     db.execute('DELETE FROM chat_sessions WHERE id = ?', [id]);
   }
 
-  Future<void> saveChatMessage(int sessionId, String role, String content) async {
+  Future<void> saveChatMessage(int sessionId, String role, String content, {List<String>? mediaPaths, String? mediaType}) async {
     final db = await database;
-    final stmt = db.prepare('INSERT INTO chat_messages (sessionId, role, content, createdAt) VALUES (?, ?, ?, ?)');
-    stmt.execute([sessionId, role, content, DateTime.now().toIso8601String()]);
+    final stmt = db.prepare('INSERT INTO chat_messages (sessionId, role, content, createdAt, mediaPaths, mediaType) VALUES (?, ?, ?, ?, ?, ?)');
+    stmt.execute([
+      sessionId,
+      role,
+      content,
+      DateTime.now().toIso8601String(),
+      mediaPaths?.join(','),
+      mediaType
+    ]);
     stmt.dispose();
   }
 
   Future<List<Map<String, dynamic>>> getChatMessages(int sessionId) async {
     final db = await database;
     final results = db.select('SELECT * FROM chat_messages WHERE sessionId = ? ORDER BY createdAt ASC', [sessionId]);
-    return results.map((row) => {'id': row['id'], 'sessionId': row['sessionId'], 'role': row['role'], 'content': row['content'], 'createdAt': row['createdAt']}).toList();
+    return results.map((row) => {
+      'id': row['id'],
+      'sessionId': row['sessionId'],
+      'role': row['role'],
+      'content': row['content'],
+      'createdAt': row['createdAt'],
+      'mediaPaths': row['mediaPaths'],
+      'mediaType': row['mediaType'],
+    }).toList();
   }
 }

@@ -1120,11 +1120,7 @@ void write_output_files() {
         src << len.str();
     }
 
-    std::vector<std::string> btypes = {"f16", "f32"};
-
-#if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
-    btypes.push_back("q8_1");
-#endif
+    std::vector<std::string> btypes = {"f16", "f32", "q8_1"};
 
     for (const std::string& btype : btypes) {
     for (const auto& tname : type_names) {

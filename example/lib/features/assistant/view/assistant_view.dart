@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
@@ -16,15 +17,15 @@ class AssistantView extends GetView<AssistantController> {
         title: const Text('Plugin Test Chat'),
         actions: [
           Obx(() => Row(
-                children: [
-                  const Text("Thinking", style: TextStyle(fontSize: 12)),
-                  Switch(
-                    value: controller.isThinkingEnabled.value,
-                    onChanged: (val) => controller.isThinkingEnabled.value = val,
-                    activeColor: Colors.blueAccent,
-                  ),
-                ],
-              )),
+            children: [
+              const Text("Thinking", style: TextStyle(fontSize: 12)),
+              Switch(
+                value: controller.isThinkingEnabled.value,
+                onChanged: (val) => controller.isThinkingEnabled.value = val,
+                activeColor: Colors.blueAccent,
+              ),
+            ],
+          )),
           IconButton(icon: const Icon(Icons.refresh), onPressed: controller.createNewChat)
         ],
       ),
@@ -42,10 +43,72 @@ class AssistantView extends GetView<AssistantController> {
             )),
           ),
           Obx(() => controller.isTyping.value ? const LinearProgressIndicator(minHeight: 2) : const SizedBox.shrink()),
+
+          // --- MODIFIED: Media Attachment Preview Bar ---
+          Obx(() {
+            if (controller.attachedMediaPaths.isEmpty) return const SizedBox.shrink();
+            return Container(
+              height: 80,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: ListView.builder(
+                scrollDirection: Axis.horizontal,
+                itemCount: controller.attachedMediaPaths.length,
+                itemBuilder: (context, index) {
+                  final path = controller.attachedMediaPaths[index];
+                  final isAudio = path.toLowerCase().endsWith('.wav') ||
+                      path.toLowerCase().endsWith('.mp3') ||
+                      path.toLowerCase().endsWith('.m4a') ||
+                      path.toLowerCase().endsWith('.flac');
+
+                  return Stack(
+                    children: [
+                      Container(
+                        margin: const EdgeInsets.only(right: 8),
+                        width: 60,
+                        decoration: BoxDecoration(
+                          color: Colors.grey[800],
+                          borderRadius: BorderRadius.circular(8),
+                          // Only load FileImage if it's an actual image
+                          image: isAudio ? null : DecorationImage(
+                            image: FileImage(File(path)),
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                        // Show audio icon if it's an audio file
+                        child: isAudio
+                            ? const Center(child: Icon(Icons.audiotrack, color: Colors.blueAccent, size: 32))
+                            : null,
+                      ),
+                      Positioned(
+                        right: 4,
+                        top: 0,
+                        child: GestureDetector(
+                          onTap: () => controller.removeAttachedMedia(index),
+                          child: Container(
+                            decoration: const BoxDecoration(shape: BoxShape.circle, color: Colors.black54),
+                            child: const Icon(Icons.close, size: 16, color: Colors.white),
+                          ),
+                        ),
+                      )
+                    ],
+                  );
+                },
+              ),
+            );
+          }),
+          // -----------------------------------------
+
           Padding(
             padding: const EdgeInsets.all(16.0),
             child: Row(
               children: [
+                // --- MODIFIED: Attachment Button (Hidden if no vision projector) ---
+                Obx(() => controller.isVisionInitialized.value
+                    ? IconButton(
+                        onPressed: controller.isTyping.value ? null : controller.pickMedia,
+                        icon: const Icon(Icons.attach_file, color: Colors.grey),
+                      )
+                    : const SizedBox.shrink()),
                 Expanded(
                   child: TextField(
                     controller: textController,
@@ -78,11 +141,52 @@ class AssistantView extends GetView<AssistantController> {
   Widget _buildUserMsg(BuildContext context, ChatMessage msg) {
     return Align(
       alignment: Alignment.centerRight,
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 12),
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(color: Colors.blueAccent, borderRadius: BorderRadius.circular(16)),
-        child: Text(msg.answerText, style: const TextStyle(color: Colors.white)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          if (msg.mediaPaths != null && msg.mediaPaths!.isNotEmpty)
+            _buildMediaGrid(msg.mediaPaths!),
+          Container(
+            margin: const EdgeInsets.only(bottom: 12),
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(color: Colors.blueAccent, borderRadius: BorderRadius.circular(16)),
+            child: Text(msg.answerText, style: const TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMediaGrid(List<String> paths) {
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 250),
+      margin: const EdgeInsets.only(bottom: 8),
+      child: Wrap(
+        spacing: 4,
+        runSpacing: 4,
+        alignment: WrapAlignment.end,
+        children: paths.map((path) {
+          final isAudio = path.toLowerCase().endsWith('.wav') ||
+              path.toLowerCase().endsWith('.mp3') ||
+              path.toLowerCase().endsWith('.m4a') ||
+              path.toLowerCase().endsWith('.flac');
+
+          return Container(
+            width: paths.length == 1 ? 200 : 80,
+            height: paths.length == 1 ? 150 : 80,
+            decoration: BoxDecoration(
+              color: Colors.grey[800],
+              borderRadius: BorderRadius.circular(8),
+              image: isAudio ? null : DecorationImage(
+                image: FileImage(File(path)),
+                fit: BoxFit.cover,
+              ),
+            ),
+            child: isAudio
+                ? const Center(child: Icon(Icons.audiotrack, color: Colors.blueAccent, size: 32))
+                : null,
+          );
+        }).toList(),
       ),
     );
   }

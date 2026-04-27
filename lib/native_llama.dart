@@ -7,19 +7,23 @@ class NativeLlama {
 
   bool _isInitialized = false;
   bool _isDraftInitialized = false;
+  bool _isVisionInitialized = false; // Note: Used for Multimodal Projector (mmproj)
 
   bool get isInitialized => _isInitialized;
   bool get isDraftInitialized => _isDraftInitialized;
+  bool get isVisionInitialized => _isVisionInitialized;
 
   /// Initializes the main base model
   /// [nCtx] Optional override for context window. If null, calculates based on device RAM.
   /// [nThreads] Optional override for CPU threads. Defaults to 4.
-  Future<void> initModel(String absolutePath, {int? nCtx, int? nThreads}) async {
+  /// [nGpuLayers] Number of layers to offload to GPU. -1 for auto (all), 0 for CPU only.
+  Future<void> initModel(String absolutePath, {int? nCtx, int? nThreads, int? nGpuLayers}) async {
     try {
       final bool result = await _methodChannel.invokeMethod('initModel', {
         'modelPath': absolutePath,
         'nCtx': nCtx,
         'nThreads': nThreads,
+        'nGpuLayers': nGpuLayers ?? 0,
       });
       _isInitialized = result;
       if (!result) throw Exception("Native initialization failed. The model may be too large for this device's memory.");
@@ -30,18 +34,33 @@ class NativeLlama {
   }
 
   /// Initializes the draft model for speculative decoding
-  Future<void> initDraftModel(String absolutePath, {int? nCtx, int? nThreads}) async {
+  Future<void> initDraftModel(String absolutePath, {int? nCtx, int? nThreads, int? nGpuLayers}) async {
     try {
       final bool result = await _methodChannel.invokeMethod('initDraftModel', {
         'modelPath': absolutePath,
         'nCtx': nCtx,
         'nThreads': nThreads,
+        'nGpuLayers': nGpuLayers ?? 0,
       });
       _isDraftInitialized = result;
       if (!result) throw Exception("Native initialization failed for draft model.");
     } on PlatformException catch (e) {
       _isDraftInitialized = false;
       throw Exception("Platform Exception during draft init: ${e.message}");
+    }
+  }
+
+  /// Initialize the Multimodal Projector (MTMD)
+  Future<void> initVision(String absolutePath) async {
+    try {
+      final bool result = await _methodChannel.invokeMethod('initVision', {
+        'mmprojPath': absolutePath,
+      });
+      _isVisionInitialized = result;
+      if (!result) throw Exception("Native initialization failed for multimodal projector.");
+    } on PlatformException catch (e) {
+      _isVisionInitialized = false;
+      throw Exception("Platform Exception during vision init: ${e.message}");
     }
   }
 
@@ -62,6 +81,7 @@ class NativeLlama {
   /// Generates response and streams tokens back to the UI
   Stream<String> generateResponse(
       List<Map<String, String>> messages, {
+        List<String>? mediaPaths, // --- MODIFIED: Accepts images & audio files ---
         double temperature = 0.7,
         int topK = 40,
         double topP = 0.9,
@@ -78,8 +98,6 @@ class NativeLlama {
             (event) {
           final token = event.toString();
 
-          // FIX: Manually close the stream when Dart catches the EOS token
-          // This prevents Android UI loaders from hanging!
           if (token == "__END_OF_STREAM__") {
             if (!controller.isClosed) controller.close();
           } else {
@@ -105,6 +123,7 @@ class NativeLlama {
       _methodChannel.invokeMethod('startGeneration', {
         'roles': roles,
         'contents': contents,
+        'mediaPaths': mediaPaths ?? [], // --- MODIFIED: Pass media array to Native ---
         'temperature': temperature,
         'topK': topK,
         'topP': topP,
@@ -127,8 +146,21 @@ class NativeLlama {
       await _methodChannel.invokeMethod('dispose');
       _isInitialized = false;
       _isDraftInitialized = false;
+      _isVisionInitialized = false;
     } catch (e) {
       print("Error disposing model: $e");
+    }
+  }
+
+  /// Gets the number of CPU cores.
+  /// [performanceOnly] If true, attempts to return only high-performance cores (Android only).
+  Future<int> getCpuCores({bool performanceOnly = false}) async {
+    try {
+      return await _methodChannel.invokeMethod('getCpuCores', {
+        'performanceOnly': performanceOnly,
+      }) ?? 4;
+    } catch (e) {
+      return 4;
     }
   }
 }

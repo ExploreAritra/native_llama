@@ -6,18 +6,21 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (instancetype)shared;
 
-// Updated signatures with overrides
-- (BOOL)initModel:(NSString *)modelPath nCtx:(int)nCtx nThreads:(int)nThreads;
-- (BOOL)initDraftModel:(NSString *)modelPath nCtx:(int)nCtx nThreads:(int)nThreads;
+- (BOOL)initModel:(NSString *)modelPath nCtx:(int)nCtx nThreads:(int)nThreads nGpuLayers:(int)nGpuLayers;
+- (BOOL)initDraftModel:(NSString *)modelPath nCtx:(int)nCtx nThreads:(int)nThreads nGpuLayers:(int)nGpuLayers;
+- (BOOL)initVision:(NSString *)mmprojPath; // NEW
 - (NSArray<NSNumber *> *)getEmbedding:(NSString *)text;
 
-// Updated signature for dynamic samplers
+// Updated signature with imagePaths array
 - (void)startGenerationWithRoles:(NSArray<NSString *> *)roles
         contents:(NSArray<NSString *> *)contents
+        mediaPaths:(NSArray<NSString *> * _Nullable)mediaPaths
         temperature:(float)temperature
         topK:(int)topK
         topP:(float)topP
         onToken:(void (^)(NSString * _Nullable))onToken;
+
+- (int)getCpuCores:(BOOL)performanceOnly;
 
 - (void)abortGeneration;
 - (void)dispose;

@@ -27,10 +27,19 @@ class NativeLlamaPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHa
     }
 
     // Native JNI bindings
-    private external fun initLlama(modelPath: String, nCtx: Int, nThreads: Int): Boolean
-    private external fun initDraftModel(modelPath: String, nCtx: Int, nThreads: Int): Boolean
+    private external fun initLlama(modelPath: String, nCtx: Int, nThreads: Int, nGpuLayers: Int): Boolean
+    private external fun initDraftModel(modelPath: String, nCtx: Int, nThreads: Int, nGpuLayers: Int): Boolean
+
+    // --- Vision/Media Model Call ---
+    private external fun initVision(mmprojPath: String): Boolean
+
+    private external fun getCpuCores(performanceOnly: Boolean): Int
+
     private external fun getEmbedding(text: String): DoubleArray?
-    private external fun startNativeGeneration(roles: Array<String>, contents: Array<String>, temperature: Float, topK: Int, topP: Float)
+
+    // --- MODIFIED: Renamed imagePaths to mediaPaths ---
+    private external fun startNativeGeneration(roles: Array<String>, contents: Array<String>, mediaPaths: Array<String>, temperature: Float, topK: Int, topP: Float)
+
     private external fun abortGeneration()
     private external fun disposeLlama()
 
@@ -48,10 +57,11 @@ class NativeLlamaPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHa
                 val modelPath = call.argument<String>("modelPath")
                 val nCtx = call.argument<Int>("nCtx") ?: -1
                 val nThreads = call.argument<Int>("nThreads") ?: -1
+                val nGpuLayers = call.argument<Int>("nGpuLayers") ?: 0
 
                 if (modelPath != null) {
                     executor.execute {
-                        val success = initLlama(modelPath, nCtx, nThreads)
+                        val success = initLlama(modelPath, nCtx, nThreads, nGpuLayers)
                         handler.post { result.success(success) }
                     }
                 } else {
@@ -62,14 +72,26 @@ class NativeLlamaPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHa
                 val modelPath = call.argument<String>("modelPath")
                 val nCtx = call.argument<Int>("nCtx") ?: -1
                 val nThreads = call.argument<Int>("nThreads") ?: -1
+                val nGpuLayers = call.argument<Int>("nGpuLayers") ?: 0
 
                 if (modelPath != null) {
                     executor.execute {
-                        val success = initDraftModel(modelPath, nCtx, nThreads)
+                        val success = initDraftModel(modelPath, nCtx, nThreads, nGpuLayers)
                         handler.post { result.success(success) }
                     }
                 } else {
                     result.error("INVALID_ARGUMENT", "Draft model path is null", null)
+                }
+            }
+            "initVision" -> {
+                val mmprojPath = call.argument<String>("mmprojPath")
+                if (mmprojPath != null) {
+                    executor.execute {
+                        val success = initVision(mmprojPath)
+                        handler.post { result.success(success) }
+                    }
+                } else {
+                    result.error("INVALID_ARGUMENT", "Vision model path is null", null)
                 }
             }
             "getEmbedding" -> {
@@ -90,6 +112,9 @@ class NativeLlamaPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHa
                 val roles = call.argument<List<String>>("roles")?.toTypedArray()
                 val contents = call.argument<List<String>>("contents")?.toTypedArray()
 
+                // --- MODIFIED: Extract mediaPaths (defaults to empty array if none) ---
+                val mediaPaths = call.argument<List<String>>("mediaPaths")?.toTypedArray() ?: emptyArray()
+
                 // Cast Double from Dart to Float for Kotlin/C++ boundary
                 val temperature = call.argument<Double>("temperature")?.toFloat() ?: 0.7f
                 val topK = call.argument<Int>("topK") ?: 40
@@ -97,7 +122,7 @@ class NativeLlamaPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHa
 
                 if (roles != null && contents != null) {
                     executor.execute {
-                        startNativeGeneration(roles, contents, temperature, topK, topP)
+                        startNativeGeneration(roles, contents, mediaPaths, temperature, topK, topP)
                     }
                     result.success(null)
                 } else {
@@ -112,6 +137,13 @@ class NativeLlamaPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHa
                 executor.execute {
                     disposeLlama()
                     handler.post { result.success(true) }
+                }
+            }
+            "getCpuCores" -> {
+                val performanceOnly = call.argument<Boolean>("performanceOnly") ?: false
+                executor.execute {
+                    val cores = getCpuCores(performanceOnly)
+                    handler.post { result.success(cores) }
                 }
             }
             else -> result.notImplemented()

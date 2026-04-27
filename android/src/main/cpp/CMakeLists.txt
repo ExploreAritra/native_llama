@@ -6,249 +6,70 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Optimization and defines
 add_compile_options(-O3 -fexceptions -frtti)
-add_definitions(-DGGML_USE_CPU)
-add_definitions(-DGGML_VERSION="0")
-add_definitions(-DGGML_COMMIT="unknown")
+
+# --- Enable Vulkan for Android GPU Acceleration ---
+set(GGML_VULKAN ON CACHE BOOL "Enable Vulkan" FORCE)
+set(GGML_VULKAN_PERF_FA OFF CACHE BOOL "Disable Flash Attention" FORCE)
+
+# --- Force compiler to ignore hardware audio frameworks ---
+add_definitions(-DMA_NO_OPENSL=1)
+add_definitions(-DMA_NO_AAUDIO=1)
+add_definitions(-DMA_NO_AVFOUNDATION=1)
+add_definitions(-DMA_NO_COREAUDIO=1)
+
+# --- Fetch Vulkan & SPIR-V C++ Headers ---
+include(FetchContent)
+
+FetchContent_Declare(
+    VulkanHeaders
+    GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
+    GIT_TAG        main
+)
+FetchContent_MakeAvailable(VulkanHeaders)
+
+FetchContent_Declare(
+    SPIRVHeaders
+    GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Headers.git
+    GIT_TAG        main
+)
+FetchContent_MakeAvailable(SPIRVHeaders)
+# ------------------------------------------------------
 
 set(SHARED_CPP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../shared_cpp")
 
-# Explicitly define core source files to avoid GLOB_RECURSE issues
-# and to prevent building unnecessary tools/examples.
-set(LLAMA_SRCS
-    "${SHARED_CPP_DIR}/src/llama.cpp"
-    "${SHARED_CPP_DIR}/src/llama-adapter.cpp"
-    "${SHARED_CPP_DIR}/src/llama-arch.cpp"
-    "${SHARED_CPP_DIR}/src/llama-batch.cpp"
-    "${SHARED_CPP_DIR}/src/llama-chat.cpp"
-    "${SHARED_CPP_DIR}/src/llama-context.cpp"
-    "${SHARED_CPP_DIR}/src/llama-cparams.cpp"
-    "${SHARED_CPP_DIR}/src/llama-grammar.cpp"
-    "${SHARED_CPP_DIR}/src/llama-graph.cpp"
-    "${SHARED_CPP_DIR}/src/llama-hparams.cpp"
-    "${SHARED_CPP_DIR}/src/llama-impl.cpp"
-    "${SHARED_CPP_DIR}/src/llama-io.cpp"
-    "${SHARED_CPP_DIR}/src/llama-kv-cache.cpp"
-    "${SHARED_CPP_DIR}/src/llama-kv-cache-iswa.cpp"
-    "${SHARED_CPP_DIR}/src/llama-memory.cpp"
-    "${SHARED_CPP_DIR}/src/llama-memory-recurrent.cpp"
-    "${SHARED_CPP_DIR}/src/llama-memory-hybrid.cpp"
-    "${SHARED_CPP_DIR}/src/llama-memory-hybrid-iswa.cpp"
-    "${SHARED_CPP_DIR}/src/llama-mmap.cpp"
-    "${SHARED_CPP_DIR}/src/llama-model.cpp"
-    "${SHARED_CPP_DIR}/src/llama-model-loader.cpp"
-    "${SHARED_CPP_DIR}/src/llama-model-saver.cpp"
-    "${SHARED_CPP_DIR}/src/llama-quant.cpp"
-    "${SHARED_CPP_DIR}/src/llama-sampler.cpp"
-    "${SHARED_CPP_DIR}/src/llama-vocab.cpp"
-    "${SHARED_CPP_DIR}/src/unicode.cpp"
-    "${SHARED_CPP_DIR}/src/unicode-data.cpp"
-    "${SHARED_CPP_DIR}/src/models/afmoe.cpp"
-    "${SHARED_CPP_DIR}/src/models/apertus.cpp"
-    "${SHARED_CPP_DIR}/src/models/arcee.cpp"
-    "${SHARED_CPP_DIR}/src/models/arctic.cpp"
-    "${SHARED_CPP_DIR}/src/models/arwkv7.cpp"
-    "${SHARED_CPP_DIR}/src/models/baichuan.cpp"
-    "${SHARED_CPP_DIR}/src/models/bailingmoe.cpp"
-    "${SHARED_CPP_DIR}/src/models/bailingmoe2.cpp"
-    "${SHARED_CPP_DIR}/src/models/bert.cpp"
-    "${SHARED_CPP_DIR}/src/models/bitnet.cpp"
-    "${SHARED_CPP_DIR}/src/models/bloom.cpp"
-    "${SHARED_CPP_DIR}/src/models/chameleon.cpp"
-    "${SHARED_CPP_DIR}/src/models/chatglm.cpp"
-    "${SHARED_CPP_DIR}/src/models/codeshell.cpp"
-    "${SHARED_CPP_DIR}/src/models/cogvlm.cpp"
-    "${SHARED_CPP_DIR}/src/models/cohere2-iswa.cpp"
-    "${SHARED_CPP_DIR}/src/models/command-r.cpp"
-    "${SHARED_CPP_DIR}/src/models/dbrx.cpp"
-    "${SHARED_CPP_DIR}/src/models/deci.cpp"
-    "${SHARED_CPP_DIR}/src/models/deepseek.cpp"
-    "${SHARED_CPP_DIR}/src/models/deepseek2.cpp"
-    "${SHARED_CPP_DIR}/src/models/delta-net-base.cpp"
-    "${SHARED_CPP_DIR}/src/models/dots1.cpp"
-    "${SHARED_CPP_DIR}/src/models/dream.cpp"
-    "${SHARED_CPP_DIR}/src/models/ernie4-5.cpp"
-    "${SHARED_CPP_DIR}/src/models/ernie4-5-moe.cpp"
-    "${SHARED_CPP_DIR}/src/models/eurobert.cpp"
-    "${SHARED_CPP_DIR}/src/models/exaone.cpp"
-    "${SHARED_CPP_DIR}/src/models/exaone4.cpp"
-    "${SHARED_CPP_DIR}/src/models/exaone-moe.cpp"
-    "${SHARED_CPP_DIR}/src/models/falcon.cpp"
-    "${SHARED_CPP_DIR}/src/models/falcon-h1.cpp"
-    "${SHARED_CPP_DIR}/src/models/gemma.cpp"
-    "${SHARED_CPP_DIR}/src/models/gemma2-iswa.cpp"
-    "${SHARED_CPP_DIR}/src/models/gemma3.cpp"
-    "${SHARED_CPP_DIR}/src/models/gemma3n-iswa.cpp"
-    "${SHARED_CPP_DIR}/src/models/gemma4-iswa.cpp"
-    "${SHARED_CPP_DIR}/src/models/gemma-embedding.cpp"
-    "${SHARED_CPP_DIR}/src/models/glm4.cpp"
-    "${SHARED_CPP_DIR}/src/models/glm4-moe.cpp"
-    "${SHARED_CPP_DIR}/src/models/gpt2.cpp"
-    "${SHARED_CPP_DIR}/src/models/gptneox.cpp"
-    "${SHARED_CPP_DIR}/src/models/granite.cpp"
-    "${SHARED_CPP_DIR}/src/models/granite-hybrid.cpp"
-    "${SHARED_CPP_DIR}/src/models/grok.cpp"
-    "${SHARED_CPP_DIR}/src/models/grovemoe.cpp"
-    "${SHARED_CPP_DIR}/src/models/hunyuan-dense.cpp"
-    "${SHARED_CPP_DIR}/src/models/hunyuan-moe.cpp"
-    "${SHARED_CPP_DIR}/src/models/internlm2.cpp"
-    "${SHARED_CPP_DIR}/src/models/jais.cpp"
-    "${SHARED_CPP_DIR}/src/models/jais2.cpp"
-    "${SHARED_CPP_DIR}/src/models/jamba.cpp"
-    "${SHARED_CPP_DIR}/src/models/kimi-linear.cpp"
-    "${SHARED_CPP_DIR}/src/models/lfm2.cpp"
-    "${SHARED_CPP_DIR}/src/models/llada.cpp"
-    "${SHARED_CPP_DIR}/src/models/llada-moe.cpp"
-    "${SHARED_CPP_DIR}/src/models/llama.cpp"
-    "${SHARED_CPP_DIR}/src/models/llama4.cpp"
-    "${SHARED_CPP_DIR}/src/models/lumina2.cpp"
-    "${SHARED_CPP_DIR}/src/models/maincoder.cpp"
-    "${SHARED_CPP_DIR}/src/models/mamba.cpp"
-    "${SHARED_CPP_DIR}/src/models/mamba-base.cpp"
-    "${SHARED_CPP_DIR}/src/models/mimo2-iswa.cpp"
-    "${SHARED_CPP_DIR}/src/models/minimax-m2.cpp"
-    "${SHARED_CPP_DIR}/src/models/minicpm3.cpp"
-    "${SHARED_CPP_DIR}/src/models/mistral3.cpp"
-    "${SHARED_CPP_DIR}/src/models/modern-bert.cpp"
-    "${SHARED_CPP_DIR}/src/models/mpt.cpp"
-    "${SHARED_CPP_DIR}/src/models/nemotron.cpp"
-    "${SHARED_CPP_DIR}/src/models/nemotron-h.cpp"
-    "${SHARED_CPP_DIR}/src/models/neo-bert.cpp"
-    "${SHARED_CPP_DIR}/src/models/olmo.cpp"
-    "${SHARED_CPP_DIR}/src/models/olmo2.cpp"
-    "${SHARED_CPP_DIR}/src/models/olmoe.cpp"
-    "${SHARED_CPP_DIR}/src/models/openai-moe-iswa.cpp"
-    "${SHARED_CPP_DIR}/src/models/openelm.cpp"
-    "${SHARED_CPP_DIR}/src/models/orion.cpp"
-    "${SHARED_CPP_DIR}/src/models/paddleocr.cpp"
-    "${SHARED_CPP_DIR}/src/models/pangu-embedded.cpp"
-    "${SHARED_CPP_DIR}/src/models/phi2.cpp"
-    "${SHARED_CPP_DIR}/src/models/phi3.cpp"
-    "${SHARED_CPP_DIR}/src/models/plamo.cpp"
-    "${SHARED_CPP_DIR}/src/models/plamo2.cpp"
-    "${SHARED_CPP_DIR}/src/models/plamo3.cpp"
-    "${SHARED_CPP_DIR}/src/models/plm.cpp"
-    "${SHARED_CPP_DIR}/src/models/qwen.cpp"
-    "${SHARED_CPP_DIR}/src/models/qwen2.cpp"
-    "${SHARED_CPP_DIR}/src/models/qwen2moe.cpp"
-    "${SHARED_CPP_DIR}/src/models/qwen2vl.cpp"
-    "${SHARED_CPP_DIR}/src/models/qwen3.cpp"
-    "${SHARED_CPP_DIR}/src/models/qwen3moe.cpp"
-    "${SHARED_CPP_DIR}/src/models/qwen3next.cpp"
-    "${SHARED_CPP_DIR}/src/models/qwen3vl.cpp"
-    "${SHARED_CPP_DIR}/src/models/qwen3vl-moe.cpp"
-    "${SHARED_CPP_DIR}/src/models/qwen35.cpp"
-    "${SHARED_CPP_DIR}/src/models/qwen35moe.cpp"
-    "${SHARED_CPP_DIR}/src/models/refact.cpp"
-    "${SHARED_CPP_DIR}/src/models/rnd1.cpp"
-    "${SHARED_CPP_DIR}/src/models/rwkv6.cpp"
-    "${SHARED_CPP_DIR}/src/models/rwkv6-base.cpp"
-    "${SHARED_CPP_DIR}/src/models/rwkv6qwen2.cpp"
-    "${SHARED_CPP_DIR}/src/models/rwkv7.cpp"
-    "${SHARED_CPP_DIR}/src/models/rwkv7-base.cpp"
-    "${SHARED_CPP_DIR}/src/models/seed-oss.cpp"
-    "${SHARED_CPP_DIR}/src/models/smallthinker.cpp"
-    "${SHARED_CPP_DIR}/src/models/smollm3.cpp"
-    "${SHARED_CPP_DIR}/src/models/stablelm.cpp"
-    "${SHARED_CPP_DIR}/src/models/starcoder.cpp"
-    "${SHARED_CPP_DIR}/src/models/starcoder2.cpp"
-    "${SHARED_CPP_DIR}/src/models/step35-iswa.cpp"
-    "${SHARED_CPP_DIR}/src/models/t5.cpp"
-    "${SHARED_CPP_DIR}/src/models/t5encoder.cpp"
-    "${SHARED_CPP_DIR}/src/models/wavtokenizer-dec.cpp"
-    "${SHARED_CPP_DIR}/src/models/xverse.cpp"
+include_directories(
+    "${vulkanheaders_SOURCE_DIR}/include"
+    "${spirvheaders_SOURCE_DIR}/include"
 )
 
-set(GGML_SRCS
-    "${SHARED_CPP_DIR}/ggml/src/ggml.c"
-    "${SHARED_CPP_DIR}/ggml/src/ggml-alloc.c"
-    "${SHARED_CPP_DIR}/ggml/src/ggml-backend.cpp"
-    "${SHARED_CPP_DIR}/ggml/src/ggml-backend-dl.cpp"
-    "${SHARED_CPP_DIR}/ggml/src/ggml-backend-reg.cpp"
-    "${SHARED_CPP_DIR}/ggml/src/ggml-backend-meta.cpp"
-    "${SHARED_CPP_DIR}/ggml/src/ggml-opt.cpp"
-    "${SHARED_CPP_DIR}/ggml/src/ggml-quants.c"
-    "${SHARED_CPP_DIR}/ggml/src/ggml-threading.cpp"
-    "${SHARED_CPP_DIR}/ggml/src/gguf.cpp"
-    "${SHARED_CPP_DIR}/ggml/src/ggml-cpu/ggml-cpu.c"
-    "${SHARED_CPP_DIR}/ggml/src/ggml-cpu/ggml-cpu.cpp"
-    "${SHARED_CPP_DIR}/ggml/src/ggml-cpu/ops.cpp"
-    "${SHARED_CPP_DIR}/ggml/src/ggml-cpu/vec.cpp"
-    "${SHARED_CPP_DIR}/ggml/src/ggml-cpu/traits.cpp"
-    "${SHARED_CPP_DIR}/ggml/src/ggml-cpu/hbm.cpp"
-    "${SHARED_CPP_DIR}/ggml/src/ggml-cpu/quants.c"
-    "${SHARED_CPP_DIR}/ggml/src/ggml-cpu/repack.cpp"
-    "${SHARED_CPP_DIR}/ggml/src/ggml-cpu/binary-ops.cpp"
-    "${SHARED_CPP_DIR}/ggml/src/ggml-cpu/unary-ops.cpp"
-)
+# --- Let the official llama.cpp CMake system handle its own build ---
+add_subdirectory("${SHARED_CPP_DIR}" llama_cpp_build)
 
-if (ANDROID_ABI MATCHES "arm64-v8a" OR ANDROID_ABI MATCHES "armeabi-v7a")
-    list(APPEND GGML_SRCS
-        "${SHARED_CPP_DIR}/ggml/src/ggml-cpu/arch/arm/quants.c"
-        "${SHARED_CPP_DIR}/ggml/src/ggml-cpu/arch/arm/repack.cpp"
-        "${SHARED_CPP_DIR}/ggml/src/ggml-cpu/arch/arm/cpu-feats.cpp"
-    )
-elseif (ANDROID_ABI MATCHES "x86_64" OR ANDROID_ABI MATCHES "x86")
-    list(APPEND GGML_SRCS
-        "${SHARED_CPP_DIR}/ggml/src/ggml-cpu/arch/x86/quants.c"
-        "${SHARED_CPP_DIR}/ggml/src/ggml-cpu/arch/x86/repack.cpp"
-        "${SHARED_CPP_DIR}/ggml/src/ggml-cpu/arch/x86/cpu-feats.cpp"
-    )
-endif()
+file(GLOB MTMD_MODEL_SRCS "${SHARED_CPP_DIR}/tools/mtmd/models/*.cpp")
 
-set(COMMON_SRCS
-    "${SHARED_CPP_DIR}/common/common.cpp"
-    "${SHARED_CPP_DIR}/common/sampling.cpp"
-    "${SHARED_CPP_DIR}/common/log.cpp"
-    "${SHARED_CPP_DIR}/common/unicode.cpp"
-    "${SHARED_CPP_DIR}/common/arg.cpp"
-    "${SHARED_CPP_DIR}/common/console.cpp"
-    "${SHARED_CPP_DIR}/common/reasoning-budget.cpp"
-    "${SHARED_CPP_DIR}/common/speculative.cpp"
-    "${SHARED_CPP_DIR}/common/hf-cache.cpp"
-    "${SHARED_CPP_DIR}/common/download.cpp"
-    "${SHARED_CPP_DIR}/common/preset.cpp"
-    "${SHARED_CPP_DIR}/common/peg-parser.cpp"
-    "${SHARED_CPP_DIR}/common/ngram-mod.cpp"
-    "${SHARED_CPP_DIR}/common/ngram-map.cpp"
-    "${SHARED_CPP_DIR}/common/ngram-cache.cpp"
-    "${SHARED_CPP_DIR}/common/chat.cpp"
-    "${SHARED_CPP_DIR}/common/chat-peg-parser.cpp"
-    "${SHARED_CPP_DIR}/common/chat-diff-analyzer.cpp"
-    "${SHARED_CPP_DIR}/common/chat-auto-parser-generator.cpp"
-    "${SHARED_CPP_DIR}/common/chat-auto-parser-helpers.cpp"
-    "${SHARED_CPP_DIR}/common/json-schema-to-grammar.cpp"
-    "${SHARED_CPP_DIR}/common/json-partial.cpp"
-    "${SHARED_CPP_DIR}/common/regex-partial.cpp"
-    "${SHARED_CPP_DIR}/common/llguidance.cpp"
-    "${SHARED_CPP_DIR}/common/jinja/string.cpp"
-    "${SHARED_CPP_DIR}/common/jinja/value.cpp"
-    "${SHARED_CPP_DIR}/common/jinja/caps.cpp"
-    "${SHARED_CPP_DIR}/common/jinja/lexer.cpp"
-    "${SHARED_CPP_DIR}/common/jinja/parser.cpp"
-    "${SHARED_CPP_DIR}/common/jinja/runtime.cpp"
-    "${SHARED_CPP_DIR}/vendor/cpp-httplib/httplib.cpp"
-)
-
+# Add our custom bridge files
 add_library(native_llama SHARED
     native-lib.cpp
     build-info.cpp
-    ${LLAMA_SRCS}
-    ${GGML_SRCS}
-    ${COMMON_SRCS}
+    "${SHARED_CPP_DIR}/tools/mtmd/clip.cpp"
+    "${SHARED_CPP_DIR}/tools/mtmd/mtmd-helper.cpp"
+    "${SHARED_CPP_DIR}/tools/mtmd/mtmd.cpp"
+    "${SHARED_CPP_DIR}/tools/mtmd/mtmd-image.cpp"
+    "${SHARED_CPP_DIR}/tools/mtmd/mtmd-audio.cpp"
+    "${SHARED_CPP_DIR}/tools/mtmd/deprecation-warning.cpp"
+    ${MTMD_MODEL_SRCS}
 )
 
-# Explicitly specify include directories to avoid header shadowing from common/jinja
 target_include_directories(native_llama PRIVATE
     .
     "${SHARED_CPP_DIR}/include"
     "${SHARED_CPP_DIR}/common"
     "${SHARED_CPP_DIR}/src"
     "${SHARED_CPP_DIR}/ggml/include"
-    "${SHARED_CPP_DIR}/ggml/src"
-    "${SHARED_CPP_DIR}/ggml/src/ggml-cpu"
+    "${SHARED_CPP_DIR}/tools/mtmd"
     "${SHARED_CPP_DIR}/vendor"
-    "${SHARED_CPP_DIR}/vendor/cpp-httplib"
 )
 
 find_library(log-lib log)
-target_link_libraries(native_llama ${log-lib})
+# CRITICAL FIX: Add vulkan back to the linker so dynamic loading can find libvulkan.so
+target_link_libraries(native_llama llama dl vulkan ${log-lib})

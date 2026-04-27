@@ -24,10 +24,11 @@ public class NativeLlamaPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
 
             let nCtx = args["nCtx"] as? Int ?? -1
             let nThreads = args["nThreads"] as? Int ?? -1
+            let nGpuLayers = args["nGpuLayers"] as? Int ?? 99
 
             // Move heavy initialization to a background thread
             DispatchQueue.global(qos: .userInitiated).async {
-                let success = LlamaBridge.shared().initModel(modelPath, nCtx: Int32(nCtx), nThreads: Int32(nThreads))
+                let success = LlamaBridge.shared().initModel(modelPath, nCtx: Int32(nCtx), nThreads: Int32(nThreads), nGpuLayers: Int32(nGpuLayers))
                 DispatchQueue.main.async { result(success) }
             }
 
@@ -40,9 +41,22 @@ public class NativeLlamaPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
 
             let nCtx = args["nCtx"] as? Int ?? -1
             let nThreads = args["nThreads"] as? Int ?? -1
+            let nGpuLayers = args["nGpuLayers"] as? Int ?? 99
 
             DispatchQueue.global(qos: .userInitiated).async {
-                let success = LlamaBridge.shared().initDraftModel(modelPath, nCtx: Int32(nCtx), nThreads: Int32(nThreads))
+                let success = LlamaBridge.shared().initDraftModel(modelPath, nCtx: Int32(nCtx), nThreads: Int32(nThreads), nGpuLayers: Int32(nGpuLayers))
+                DispatchQueue.main.async { result(success) }
+            }
+
+        case "initVision":
+            guard let args = call.arguments as? [String: Any],
+                  let mmprojPath = args["mmprojPath"] as? String else {
+                result(FlutterError(code: "INVALID_ARGUMENT", message: "Vision model path is null", details: nil))
+                return
+            }
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                let success = LlamaBridge.shared().initVision(mmprojPath)
                 DispatchQueue.main.async { result(success) }
             }
 
@@ -65,6 +79,9 @@ public class NativeLlamaPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                 return
             }
 
+            // --- MODIFIED: Extract media paths instead of image paths ---
+            let mediaPaths = args["mediaPaths"] as? [String] ?? []
+
             let temperature = (args["temperature"] as? NSNumber)?.floatValue ?? 0.7
             let topK = args["topK"] as? Int ?? 40
             let topP = (args["topP"] as? NSNumber)?.floatValue ?? 0.9
@@ -73,14 +90,15 @@ public class NativeLlamaPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             UIApplication.shared.isIdleTimerDisabled = true
 
             DispatchQueue.global(qos: .userInitiated).async {
+                // Pass mediaPaths to the bridge
                 LlamaBridge.shared().startGeneration(withRoles: roles,
                                                     contents: contents,
+                                                  mediaPaths: mediaPaths,
                                                  temperature: temperature,
                                                         topK: Int32(topK),
                                                         topP: topP) { [weak self] token in
                     guard let token = token else { return }
                     DispatchQueue.main.async {
-                        // FIX: Pass the EOS string explicitly so Dart can catch it manually
                         if token == "__END_OF_STREAM__" {
                             UIApplication.shared.isIdleTimerDisabled = false
                             self?.eventSink?(token)
@@ -102,6 +120,11 @@ public class NativeLlamaPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                 LlamaBridge.shared().dispose()
                 DispatchQueue.main.async { result(true) }
             }
+
+        case "getCpuCores":
+            let performanceOnly = (call.arguments as? [String: Any])?["performanceOnly"] as? Bool ?? false
+            let cores = LlamaBridge.shared().getCpuCores(performanceOnly)
+            result(Int(cores))
 
         default:
             result(FlutterMethodNotImplemented)

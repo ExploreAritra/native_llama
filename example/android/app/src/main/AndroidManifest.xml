@@ -8,11 +8,15 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
-        android:label="native_llama_example"
+        android:label="Native Llama"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:largeHeap="true"
         android:extractNativeLibs="true">
+
+        <meta-data
+            android:name="io.flutter.app.android.EnableImpeller"
+            android:value="false" />
 
         <activity
             android:name=".MainActivity"
