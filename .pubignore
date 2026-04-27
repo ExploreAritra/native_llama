@@ -1,7 +1,19 @@
-# Exclude large binary shaders and redundant scripts from pub.dev package
-android/src/main/shaders/*.spv
-fix_shaders.py
-ios/shared_cpp_copy/
-.DS_Store
-*.swp
-*.log
+# Ignore Desktop/Web Hardware Backends
+shared_cpp/ggml/src/ggml-cuda/
+shared_cpp/ggml/src/ggml-sycl/
+shared_cpp/ggml/src/ggml-hexagon/
+shared_cpp/ggml/src/ggml-musa/
+shared_cpp/ggml/src/ggml-webgpu/
+shared_cpp/ggml/src/ggml-opencl/
+shared_cpp/ggml/src/ggml-openvino/
+
+# Ignore Test Assets
+shared_cpp/tools/mtmd/test-1.jpeg
+shared_cpp/tools/mtmd/test-2.mp3
+shared_cpp/tools/mtmd/tests/
+
+# Ensure all example build artifacts are stripped
+example/build/
+example/ios/build/
+example/android/app/build/
+example/android/.cxx/
