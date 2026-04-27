@@ -1,0 +1,7 @@
+# Exclude large binary shaders and redundant scripts from pub.dev package
+android/src/main/shaders/*.spv
+fix_shaders.py
+ios/shared_cpp_copy/
+.DS_Store
+*.swp
+*.log

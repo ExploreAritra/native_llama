@@ -11,7 +11,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)initVision:(NSString *)mmprojPath; // NEW
 - (NSArray<NSNumber *> *)getEmbedding:(NSString *)text;
 
-// Updated signature with imagePaths array
+// Updated signature with mediaPaths array
 - (void)startGenerationWithRoles:(NSArray<NSString *> *)roles
         contents:(NSArray<NSString *> *)contents
         mediaPaths:(NSArray<NSString *> * _Nullable)mediaPaths

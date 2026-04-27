@@ -92,11 +92,11 @@ public class NativeLlamaPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             DispatchQueue.global(qos: .userInitiated).async {
                 // Pass mediaPaths to the bridge
                 LlamaBridge.shared().startGeneration(withRoles: roles,
-                                                    contents: contents,
-                                                  mediaPaths: mediaPaths,
-                                                 temperature: temperature,
-                                                        topK: Int32(topK),
-                                                        topP: topP) { [weak self] token in
+                                                     contents: contents,
+                                                     mediaPaths: mediaPaths.isEmpty ? nil : mediaPaths,
+                                                     temperature: temperature,
+                                                     topK: Int32(topK),
+                                                     topP: topP) { [weak self] token in
                     guard let token = token else { return }
                     DispatchQueue.main.async {
                         if token == "__END_OF_STREAM__" {
