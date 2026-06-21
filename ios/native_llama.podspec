@@ -26,10 +26,16 @@ Pod::Spec.new do |s|
     'shared_cpp/tools/mtmd/**/*.{h,cpp,c}'
   ]
 
-  # Exclude ALL standalone CLI and Debug tools to prevent duplicate main() symbols
+  # Exclude ALL standalone CLI and Debug tools to prevent duplicate main() symbols.
+  # Also exclude the Metal backend on iOS: native_sd already ships a (merged,
+  # self-contained) ggml-metal.metal at the app-bundle root, and a second one here
+  # would collide by filename AND ours is unmerged (its runtime `#include
+  # "ggml-common.h"` fails to compile → crash). Gemma planning runs on the CPU
+  # backend (Accelerate); native_sd keeps Metal/GPU for image gen.
   s.exclude_files = [
     'shared_cpp/tools/mtmd/mtmd-cli.cpp',
-    'shared_cpp/tools/mtmd/debug/mtmd-debug.cpp'
+    'shared_cpp/tools/mtmd/debug/mtmd-debug.cpp',
+    'shared_cpp/ggml/src/ggml-metal/**/*'
   ]
 
   s.public_header_files = 'Classes/**/*.h'
@@ -42,8 +48,7 @@ Pod::Spec.new do |s|
   s.dependency 'Flutter'
   s.platform = :ios, '17.0'
 
-  # 2. Compile Metal shaders
-  s.resources = ['shared_cpp/ggml/src/ggml-metal/*.metal']
+  # No Metal shader bundled (CPU-only on iOS — see exclude_files above).
 
   s.compiler_flags = '-fno-objc-arc -DMA_NO_AVFOUNDATION=1 -DMA_NO_COREAUDIO=1'
 
@@ -54,7 +59,7 @@ Pod::Spec.new do |s|
     'MTL_PREPROCESSOR_DEFINITIONS' => 'GGML_METAL_HAS_BF16=1',
     'MTL_LANGUAGE_REVISION' => 'Metal31',
 
-    'OTHER_LDFLAGS' => '$(inherited) -framework Metal -framework Foundation',
+    'OTHER_LDFLAGS' => '$(inherited) -framework Foundation',
 
     # --- CRITICAL FIX: Undefine the broken Apple cache line macro and Force Obj-C++ ---
     # The -include namespaces this plugin's vendored ggml/gguf/stb symbols (prefix
@@ -105,16 +110,13 @@ Pod::Spec.new do |s|
 
     'GCC_PREPROCESSOR_DEFINITIONS' => [
       '$(inherited)',
-      'GGML_USE_METAL=1',
       'GGML_USE_ACCELERATE=1',
       'GGML_USE_CPU=1',
-      'GGML_METAL_NDEBUG=1',
-      'GGML_METAL_HAS_BF16=1',
       'GGML_VERSION="\\"4412\\""',
       'GGML_COMMIT="\\"82f7e77\\""'
     ].join(' ')
   }
 
-  s.frameworks = 'Accelerate', 'Metal', 'MetalKit', 'MetalPerformanceShaders'
+  s.frameworks = 'Accelerate'
   s.swift_version = '5.0'
 end
