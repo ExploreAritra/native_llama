@@ -57,7 +57,11 @@ Pod::Spec.new do |s|
     'OTHER_LDFLAGS' => '$(inherited) -framework Metal -framework Foundation',
 
     # --- CRITICAL FIX: Undefine the broken Apple cache line macro and Force Obj-C++ ---
-    'OTHER_CPLUSPLUSFLAGS' => '$(inherited) -fno-modules -x objective-c++ -U__cpp_lib_hardware_interference_size',
+    # The -include namespaces this plugin's vendored ggml/gguf/stb symbols (prefix
+    # nl_) so they don't collide at the app link with native_sd's ggml / MediaPipe's
+    # stb (~448 duplicate symbols otherwise). See shared_cpp/ggml_symbol_prefix.h.
+    'OTHER_CPLUSPLUSFLAGS' => '$(inherited) -fno-modules -x objective-c++ -U__cpp_lib_hardware_interference_size -include "$(PODS_TARGET_SRCROOT)/shared_cpp/ggml_symbol_prefix.h"',
+    'OTHER_CFLAGS' => '$(inherited) -include "$(PODS_TARGET_SRCROOT)/shared_cpp/ggml_symbol_prefix.h"',
 
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++17',
     'CLANG_CXX_LIBRARY' => 'libc++',
