@@ -27,15 +27,9 @@ Pod::Spec.new do |s|
   ]
 
   # Exclude ALL standalone CLI and Debug tools to prevent duplicate main() symbols.
-  # Also exclude the Metal backend on iOS: native_sd already ships a (merged,
-  # self-contained) ggml-metal.metal at the app-bundle root, and a second one here
-  # would collide by filename AND ours is unmerged (its runtime `#include
-  # "ggml-common.h"` fails to compile → crash). Gemma planning runs on the CPU
-  # backend (Accelerate); native_sd keeps Metal/GPU for image gen.
   s.exclude_files = [
     'shared_cpp/tools/mtmd/mtmd-cli.cpp',
-    'shared_cpp/tools/mtmd/debug/mtmd-debug.cpp',
-    'shared_cpp/ggml/src/ggml-metal/**/*'
+    'shared_cpp/tools/mtmd/debug/mtmd-debug.cpp'
   ]
 
   s.public_header_files = 'Classes/**/*.h'
@@ -48,7 +42,20 @@ Pod::Spec.new do |s|
   s.dependency 'Flutter'
   s.platform = :ios, '17.0'
 
-  # No Metal shader bundled (CPU-only on iOS — see exclude_files above).
+  # Metal shader: native_sd also vendors ggml and bundles its own (merged)
+  # ggml-metal.metal at the app-bundle root. To coexist, we (1) inline the
+  # #included headers so this shader compiles at runtime, and (2) bundle it under
+  # a UNIQUE name (nl-ggml-metal.metal). Our ggml-metal loader is patched to look
+  # for that name, and its class is symbol-prefixed (NL_GGMLMetalClass), so the
+  # two metal backends load their own shaders with no collision.
+  s.prepare_command = <<-CMD
+    cd shared_cpp/ggml/src/ggml-metal
+    awk '/#include "ggml-common.h"/{system("cat ../ggml-common.h");next}1' ggml-metal.metal > nl-tmp.metal
+    awk '/#include "ggml-metal-impl.h"/{system("cat ggml-metal-impl.h");next}1' nl-tmp.metal > nl-ggml-metal.metal
+    rm nl-tmp.metal
+  CMD
+
+  s.resources = ['shared_cpp/ggml/src/ggml-metal/nl-ggml-metal.metal']
 
   s.compiler_flags = '-fno-objc-arc -DMA_NO_AVFOUNDATION=1 -DMA_NO_COREAUDIO=1'
 
@@ -59,7 +66,7 @@ Pod::Spec.new do |s|
     'MTL_PREPROCESSOR_DEFINITIONS' => 'GGML_METAL_HAS_BF16=1',
     'MTL_LANGUAGE_REVISION' => 'Metal31',
 
-    'OTHER_LDFLAGS' => '$(inherited) -framework Foundation',
+    'OTHER_LDFLAGS' => '$(inherited) -framework Metal -framework Foundation',
 
     # --- CRITICAL FIX: Undefine the broken Apple cache line macro and Force Obj-C++ ---
     # The -include namespaces this plugin's vendored ggml/gguf/stb symbols (prefix
@@ -110,13 +117,16 @@ Pod::Spec.new do |s|
 
     'GCC_PREPROCESSOR_DEFINITIONS' => [
       '$(inherited)',
+      'GGML_USE_METAL=1',
       'GGML_USE_ACCELERATE=1',
       'GGML_USE_CPU=1',
+      'GGML_METAL_NDEBUG=1',
+      'GGML_METAL_HAS_BF16=1',
       'GGML_VERSION="\\"4412\\""',
       'GGML_COMMIT="\\"82f7e77\\""'
     ].join(' ')
   }
 
-  s.frameworks = 'Accelerate'
+  s.frameworks = 'Accelerate', 'Metal', 'MetalKit', 'MetalPerformanceShaders'
   s.swift_version = '5.0'
 end

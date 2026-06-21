@@ -31,3 +31,4 @@ migrate_working_dir/
 .flutter-plugins-dependencies
 /build/
 /coverage/
+ios/shared_cpp/ggml/src/ggml-metal/nl-ggml-metal.metal

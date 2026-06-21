@@ -186,15 +186,17 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
 
             GGML_LOG_INFO("%s: GGML_METAL_PATH_RESOURCES = %s\n", __func__, path_resource ? [path_resource UTF8String] : "nil");
 
+            // native_llama bundles its shader as nl-ggml-metal.metal (unique name)
+            // so it doesn't collide with native_sd's ggml-metal.metal in the app.
             if (path_resource) {
-                path_source = [path_resource stringByAppendingPathComponent:@"ggml-metal.metal"];
+                path_source = [path_resource stringByAppendingPathComponent:@"nl-ggml-metal.metal"];
             } else {
-                path_source = [bundle pathForResource:@"ggml-metal" ofType:@"metal"];
+                path_source = [bundle pathForResource:@"nl-ggml-metal" ofType:@"metal"];
             }
 
             if (path_source == nil) {
-                GGML_LOG_WARN("%s: error: could not use bundle path to find ggml-metal.metal, falling back to trying cwd\n", __func__);
-                path_source = @"ggml-metal.metal";
+                GGML_LOG_WARN("%s: error: could not use bundle path to find nl-ggml-metal.metal, falling back to trying cwd\n", __func__);
+                path_source = @"nl-ggml-metal.metal";
             }
 
             GGML_LOG_INFO("%s: loading '%s'\n", __func__, [path_source UTF8String]);
