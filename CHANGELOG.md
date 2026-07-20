@@ -1,3 +1,9 @@
+## 1.1.0 (Unreleased)
+
+* **Bonsai 1-bit support (Q1_0 / `Q1_0_g128`, ggml type 41):** PrismML's Bonsai-1.7B/4B/8B `Q1_0` GGUF models load and generate on all backends — Metal (iOS), Vulkan (Android, native q1_0 matmul/dequant/get_rows pipelines), and CPU.
+* **CPU performance:** ported the optimized ARM NEON `q1_0` dot-product kernels from the PrismML llama.cpp fork (i8mm 2-row, DOTPROD, and plain-NEON paths), improving 1-bit decode speed on ARM CPUs.
+* **Attribution:** Bonsai model weights © PrismML (Apache-2.0); Q1_0 kernels from llama.cpp / PrismML-Eng fork (MIT).
+
 ## 1.0.1
 
 * **Architectural Overhaul:** Transitioned from dynamic `FetchContent`/Git cloning to a unified, bundled `shared_cpp` architecture for flawless local symlink development and CocoaPods reliability.

@@ -79,6 +79,42 @@ await llama.initDraftModel("/path/to/small_draft_model.gguf");
 llama.generateResponse(messages).listen((token) => ...);
 ```
 
+## Bonsai 1-bit Models (Q1_0)
+
+`native_llama` supports PrismML's [**Bonsai**](https://huggingface.co/collections/prism-ml/bonsai) 1-bit LLMs in the `Q1_0_g128` GGUF format (ggml tensor type 41: weights quantized to {-1, +1} with FP16 scales per 128-weight group). These models trade a small amount of quality for dramatically smaller downloads and memory footprints — ideal for on-device use.
+
+| Model | File | Size |
+|-------|------|------|
+| Bonsai-1.7B | `Bonsai-1.7B-Q1_0.gguf` | ~237 MB |
+| Bonsai-4B   | `Bonsai-4B-Q1_0.gguf`   | ~546 MB |
+| Bonsai-8B   | `Bonsai-8B-Q1_0.gguf`   | ~1.08 GB |
+
+No special API is needed — load the `.gguf` like any other model:
+
+```dart
+await llama.initModel("/path/to/Bonsai-1.7B-Q1_0.gguf");
+```
+
+**How it runs:** Q1_0 is executed by optimized kernels on every backend —
+Metal on iOS (`kernel_mul_mv_q1_0_f32`), Vulkan on Android (native `q1_0`
+matmul/dequant pipelines), and ARM NEON on CPU (i8mm/DOTPROD/plain-NEON paths,
+ported from the PrismML fork). On devices without Vulkan support, Q1_0 tensors
+fall back to the CPU backend automatically via llama.cpp's backend scheduler.
+
+**Performance notes** (Bonsai-1.7B-Q1_0, measured on an Apple-silicon Mac,
+greedy decode): ~101 tok/s with Metal offload, ~50 tok/s CPU-only. Expect
+lower numbers on mobile SoCs, with the same Metal/Vulkan speedup pattern.
+
+**Compatibility:** the fork-only `Q2_0` 2-bit format (type 42) used by some
+PrismML releases is **not** supported by the vendored llama.cpp snapshot —
+use the `Q1_0` files. Bonsai-27B (Qwen3.6 hybrid architecture) is untested.
+
+**Attribution:** Bonsai model weights are © PrismML, licensed under
+[Apache-2.0](https://huggingface.co/prism-ml/Bonsai-1.7B-gguf/blob/main/LICENSE).
+The Q1_0 ggml kernels are part of llama.cpp (MIT, © the ggml authors); the ARM
+NEON Q1_0 dot-product optimizations are ported from
+[PrismML-Eng/llama.cpp](https://github.com/PrismML-Eng/llama.cpp) (MIT).
+
 ## Example App
 Check the `example` directory for a full-featured chat application that includes:
 - Model downloading and management.
