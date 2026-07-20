@@ -38,9 +38,14 @@ class NativeLlamaPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHa
     private external fun getEmbedding(text: String): DoubleArray?
 
     // --- MODIFIED: Renamed imagePaths to mediaPaths ---
-    private external fun startNativeGeneration(roles: Array<String>, contents: Array<String>, mediaPaths: Array<String>, temperature: Float, topK: Int, topP: Float)
+    private external fun startNativeGeneration(roles: Array<String>, contents: Array<String>, mediaPaths: Array<String>, temperature: Float, topK: Int, topP: Float, repeatPenalty: Float, penaltyLastN: Int, freqPenalty: Float, presencePenalty: Float)
 
     private external fun abortGeneration()
+
+    // Recreates only the llama context (KV cache + positions), keeping weights +
+    // vision projector resident — a cheap, clean reset between images.
+    private external fun resetContext(nCtx: Int): Boolean
+
     private external fun disposeLlama()
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
@@ -119,10 +124,15 @@ class NativeLlamaPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHa
                 val temperature = call.argument<Double>("temperature")?.toFloat() ?: 0.7f
                 val topK = call.argument<Int>("topK") ?: 40
                 val topP = call.argument<Double>("topP")?.toFloat() ?: 0.9f
+                // Repetition penalty (defaults preserve the previous baked-in values).
+                val repeatPenalty = call.argument<Double>("repeatPenalty")?.toFloat() ?: 1.2f
+                val penaltyLastN = call.argument<Int>("penaltyLastN") ?: 128
+                val freqPenalty = call.argument<Double>("freqPenalty")?.toFloat() ?: 0.1f
+                val presencePenalty = call.argument<Double>("presencePenalty")?.toFloat() ?: 0.1f
 
                 if (roles != null && contents != null) {
                     executor.execute {
-                        startNativeGeneration(roles, contents, mediaPaths, temperature, topK, topP)
+                        startNativeGeneration(roles, contents, mediaPaths, temperature, topK, topP, repeatPenalty, penaltyLastN, freqPenalty, presencePenalty)
                     }
                     result.success(null)
                 } else {
@@ -132,6 +142,13 @@ class NativeLlamaPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHa
             "abortGeneration" -> {
                 abortGeneration()
                 result.success(true)
+            }
+            "resetContext" -> {
+                val nCtx = call.argument<Int>("nCtx") ?: -1
+                executor.execute {
+                    val success = resetContext(nCtx)
+                    handler.post { result.success(success) }
+                }
             }
             "dispose" -> {
                 executor.execute {

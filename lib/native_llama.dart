@@ -79,12 +79,22 @@ class NativeLlama {
   }
 
   /// Generates response and streams tokens back to the UI
+  /// [repeatPenalty] / [penaltyLastN] / [freqPenalty] / [presencePenalty] control
+  /// the sampler's repetition penalty. The defaults preserve the long-standing
+  /// baked-in values. Pass `repeatPenalty: 1.0, freqPenalty: 0, presencePenalty: 0`
+  /// to turn it OFF for structured/list output (e.g. a JSON array of similar
+  /// objects), which the penalty otherwise truncates by penalising the repeated
+  /// structural tokens.
   Stream<String> generateResponse(
       List<Map<String, String>> messages, {
         List<String>? mediaPaths, // --- MODIFIED: Accepts images & audio files ---
         double temperature = 0.7,
         int topK = 40,
         double topP = 0.9,
+        double repeatPenalty = 1.2,
+        int penaltyLastN = 128,
+        double freqPenalty = 0.1,
+        double presencePenalty = 0.1,
       }) {
     if (!_isInitialized) {
       return Stream.error("Model not initialized");
@@ -127,6 +137,10 @@ class NativeLlama {
         'temperature': temperature,
         'topK': topK,
         'topP': topP,
+        'repeatPenalty': repeatPenalty,
+        'penaltyLastN': penaltyLastN,
+        'freqPenalty': freqPenalty,
+        'presencePenalty': presencePenalty,
       }).catchError((e) {
         if (!controller.isClosed) controller.addError(e);
       });
@@ -138,6 +152,32 @@ class NativeLlama {
   /// Force stops the current generation loop
   Future<void> abortGeneration() async {
     await _methodChannel.invokeMethod('abortGeneration');
+  }
+
+  /// Resets the generation context (KV cache + positions) WITHOUT unloading the
+  /// model weights or the vision projector, so the next generation starts from a
+  /// clean state at a fraction of a full reload's cost. This is the safe way to
+  /// process several images in sequence: a full reset per image keeps each one's
+  /// M-RoPE positions clean without paying the multi-GB weight reload each time.
+  ///
+  /// Returns true on success, false when the model isn't loaded or the running
+  /// native build predates this method (older builds report it as not
+  /// implemented). On false the caller should fall back to dispose + re-init.
+  ///
+  /// [nCtx] should match the value passed to [initModel]; the context is
+  /// recreated with the same window.
+  Future<bool> resetContext({int? nCtx}) async {
+    if (!_isInitialized) return false;
+    try {
+      final bool ok = await _methodChannel.invokeMethod('resetContext', {
+        'nCtx': nCtx,
+      });
+      return ok;
+    } on MissingPluginException {
+      return false; // native build without resetContext — caller falls back
+    } on PlatformException {
+      return false;
+    }
   }
 
   /// Safely disposes of models to prevent OOM crashes

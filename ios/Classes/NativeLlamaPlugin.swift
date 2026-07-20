@@ -85,6 +85,11 @@ public class NativeLlamaPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             let temperature = (args["temperature"] as? NSNumber)?.floatValue ?? 0.7
             let topK = args["topK"] as? Int ?? 40
             let topP = (args["topP"] as? NSNumber)?.floatValue ?? 0.9
+            // Repetition penalty (defaults preserve the previous baked-in values).
+            let repeatPenalty = (args["repeatPenalty"] as? NSNumber)?.floatValue ?? 1.2
+            let penaltyLastN = args["penaltyLastN"] as? Int ?? 128
+            let freqPenalty = (args["freqPenalty"] as? NSNumber)?.floatValue ?? 0.1
+            let presencePenalty = (args["presencePenalty"] as? NSNumber)?.floatValue ?? 0.1
 
             // Prevent screen from sleeping during long generations
             UIApplication.shared.isIdleTimerDisabled = true
@@ -96,7 +101,11 @@ public class NativeLlamaPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                                                      mediaPaths: mediaPaths.isEmpty ? nil : mediaPaths,
                                                      temperature: temperature,
                                                      topK: Int32(topK),
-                                                     topP: topP) { [weak self] token in
+                                                     topP: topP,
+                                                     repeatPenalty: repeatPenalty,
+                                                     penaltyLastN: Int32(penaltyLastN),
+                                                     freqPenalty: freqPenalty,
+                                                     presencePenalty: presencePenalty) { [weak self] token in
                     guard let token = token else { return }
                     DispatchQueue.main.async {
                         if token == "__END_OF_STREAM__" {
@@ -114,6 +123,13 @@ public class NativeLlamaPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         case "abortGeneration":
             LlamaBridge.shared().abortGeneration()
             result(true)
+
+        case "resetContext":
+            let nCtx = (call.arguments as? [String: Any])?["nCtx"] as? Int ?? -1
+            DispatchQueue.global(qos: .userInitiated).async {
+                let success = LlamaBridge.shared().resetContext(Int32(nCtx))
+                DispatchQueue.main.async { result(success) }
+            }
 
         case "dispose":
             DispatchQueue.global(qos: .userInitiated).async {

@@ -13,6 +13,7 @@
 // --- MTMD Headers ---
 #include "mtmd.h"
 #include "mtmd-helper.h"
+#include "chat.h"  // common_chat_* — Jinja chat-template formatting (like mtmd-cli)
 
 #define TAG "NATIVE_LLAMA_JNI"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -24,6 +25,7 @@ static llama_model * model_draft = nullptr;
 static llama_context * ctx_draft = nullptr;
 static mtmd_context * mtmd_ctx = nullptr;
 static bool stop_generation = false;
+static int32_t active_n_ctx = 0; // resolved context window of the live ctx (for resetContext)
 
 double getPhysicalMemoryGB() {
     long pages = sysconf(_SC_PHYS_PAGES);
@@ -111,8 +113,38 @@ Java_com_timebox_native_1llama_NativeLlamaPlugin_initLlama(JNIEnv *env, jobject 
         return JNI_FALSE;
     }
 
+    active_n_ctx = cparams.n_ctx; // remember for a later resetContext
     env->ReleaseStringUTFChars(model_path, path);
     LOGI("Llama model initialized successfully");
+    return JNI_TRUE;
+}
+
+// Recreate ONLY the llama context, keeping the model weights and the mtmd vision
+// projector resident. A fresh context resets the KV cache and M-RoPE position
+// state so the next generation (e.g. the next page image) starts clean WITHOUT
+// the multi-GB weight + projector reload that dispose + init costs. llama.cpp's
+// per-generation memory_clear does not reliably reset M-RoPE positions on a
+// reused vision context after a large/aborted decode; a brand-new context does.
+JNIEXPORT jboolean JNICALL
+Java_com_timebox_native_1llama_NativeLlamaPlugin_resetContext(JNIEnv *env, jobject thiz, jint n_ctx) {
+    if (model == nullptr) return JNI_FALSE; // nothing loaded — caller falls back
+
+    if (ctx) { llama_free(ctx); ctx = nullptr; }
+
+    // Rebuild the context params exactly as initLlama did.
+    auto cparams = llama_context_default_params();
+    cparams.n_threads = 4;
+    cparams.n_batch = 512;
+    cparams.embeddings = true;
+    cparams.n_ctx = n_ctx > 0 ? n_ctx : (active_n_ctx > 0 ? active_n_ctx : 4096);
+
+    ctx = llama_init_from_model(model, cparams);
+    if (ctx == nullptr) {
+        LOGE("resetContext: failed to recreate context");
+        return JNI_FALSE;
+    }
+    active_n_ctx = cparams.n_ctx;
+    LOGI("resetContext: context recreated (n_ctx=%d)", cparams.n_ctx);
     return JNI_TRUE;
 }
 
@@ -130,8 +162,14 @@ Java_com_timebox_native_1llama_NativeLlamaPlugin_initVision(JNIEnv *env, jobject
     }
 
     mtmd_context_params mtmd_params = mtmd_context_params_default();
+    // Vision encoder on the GPU (Vulkan). The A19-Metal "tensor API" bug that made
+    // iOS extraction return all-empty fields is Metal-only (fixed there via
+    // GGML_METAL_TENSOR_DISABLE); it does not apply to the Vulkan backend, so
+    // Android keeps the vision encoder on the GPU for speed.
     mtmd_params.use_gpu = true;
-    mtmd_params.image_max_tokens = 1024;
+    // Full-page document reads (Qwen2.5-VL) need enough vision tokens to keep
+    // fine print legible; 1536 handles a dense A4 page without tiling.
+    mtmd_params.image_max_tokens = 1536;
     mtmd_params.image_min_tokens = 256;
 
     mtmd_ctx = mtmd_init_from_file(path, model, mtmd_params);
@@ -271,7 +309,7 @@ static bool sendToken(JNIEnv *env, jobject thiz, jmethodID methodID, const struc
 }
 
 JNIEXPORT void JNICALL
-Java_com_timebox_native_1llama_NativeLlamaPlugin_startNativeGeneration(JNIEnv *env, jobject thiz, jobjectArray roles, jobjectArray contents, jobjectArray media_paths, jfloat temperature, jint top_k, jfloat top_p) {
+Java_com_timebox_native_1llama_NativeLlamaPlugin_startNativeGeneration(JNIEnv *env, jobject thiz, jobjectArray roles, jobjectArray contents, jobjectArray media_paths, jfloat temperature, jint top_k, jfloat top_p, jfloat repeat_penalty, jint penalty_last_n, jfloat freq_penalty, jfloat presence_penalty) {
 if (ctx == nullptr || model == nullptr) return;
 
 stop_generation = false;
@@ -283,8 +321,11 @@ const struct llama_vocab * vocab = llama_model_get_vocab(model);
 int n_media = media_paths != nullptr ? env->GetArrayLength(media_paths) : 0;
 bool use_draft = (ctx_draft != nullptr && n_media == 0);
 
-llama_memory_seq_rm(llama_get_memory(ctx), -1, -1, -1);
-if (use_draft) llama_memory_seq_rm(llama_get_memory(ctx_draft), -1, -1, -1);
+// Fully reset context between generations. A partial seq_rm(-1,-1,-1) does NOT
+// reset the cell tails of recurrent/hybrid models (e.g. Qwen3-Next / Mamba),
+// tripping GGML_ASSERT(cell.has_seq_id(seq_id)) in find_slot on the next decode.
+llama_memory_clear(llama_get_memory(ctx), true);
+if (use_draft) llama_memory_clear(llama_get_memory(ctx_draft), true);
 
 uint32_t n_batch_size = llama_n_batch(ctx);
 if (use_draft) { n_batch_size = std::min(n_batch_size, llama_n_batch(ctx_draft)); }
@@ -313,25 +354,57 @@ stored_croles[i] = role_str;
 stored_ccontents[i] = content_str;
 }
 
-char tmpl[2048];
-int32_t tmpl_len = llama_model_meta_val_str(model, "tokenizer.chat_template", tmpl, sizeof(tmpl));
-const char* tmpl_ptr = (tmpl_len > 0) ? tmpl : nullptr;
-
-int32_t n_formatted = llama_chat_apply_template(tmpl_ptr, chat.data(), n_msg, true, nullptr, 0);
-std::vector<char> formatted_prompt;
-if (n_formatted > 0) {
-formatted_prompt.resize(n_formatted + 1);
-llama_chat_apply_template(tmpl_ptr, chat.data(), n_msg, true, formatted_prompt.data(), formatted_prompt.size());
-} else {
-std::string s = "";
-for(int i=0; i<n_msg; i++) { s += std::string(chat[i].role) + ": " + std::string(chat[i].content) + "\n"; }
-s += "assistant: ";
-formatted_prompt.assign(s.begin(), s.end());
-formatted_prompt.push_back('\0');
-n_formatted = s.length();
+// Format with the model's OWN chat template via the Jinja (common_chat) path —
+// the same one mtmd-cli uses. The C-API llama_chat_apply_template does NOT honor
+// custom templates like NuExtract3's (which frame the extraction task + enable
+// thinking) → hallucinated output. use_jinja=true fixes it. Falls back to a
+// plain role/content concatenation if the template can't be applied.
+std::string prompt_str;
+try {
+    common_chat_templates_ptr tmpls = common_chat_templates_init(model, "");
+    common_chat_templates_inputs inputs;
+    inputs.use_jinja = true;
+    inputs.add_generation_prompt = true;
+    // Thinking ON: NuExtract3 appears to need its reasoning step to actually
+    // READ the page (accurate only with thinking on in testing). The Dart layer
+    // bounds runaway generation with a hard token cap + stop-on-JSON.
+    inputs.enable_thinking = true;
+    // Assistant prefill: a trailing message with role "assistant" is NOT a
+    // completed turn — it's a seed the model must CONTINUE (e.g. "{" to force an
+    // immediate JSON reply from a model that would otherwise think out loud).
+    // Rendering it through the template would close the turn with an
+    // EOS/<|im_end|>, so instead we keep add_generation_prompt=true (prompt ends
+    // at the open assistant turn) and append the seed text afterwards.
+    int n_tmpl = n_msg;
+    std::string assistant_prefix;
+    if (n_msg > 0 && std::string(chat[n_msg - 1].role) == "assistant") {
+        assistant_prefix = std::string(chat[n_msg - 1].content);
+        n_tmpl -= 1; // don't feed the seed to the template
+    }
+    for (int i = 0; i < n_tmpl; ++i) {
+        common_chat_msg m;
+        m.role = chat[i].role;
+        m.content = chat[i].content;
+        inputs.messages.push_back(m);
+    }
+    common_chat_params cparams = common_chat_templates_apply(tmpls.get(), inputs);
+    prompt_str = cparams.prompt + assistant_prefix;
+} catch (const std::exception & e) {
+    // fall through to fallback below
 }
-
-std::string prompt_str = formatted_prompt.data();
+if (prompt_str.empty()) {
+    for (int i = 0; i < n_msg; i++) {
+        if (i + 1 == n_msg && std::string(chat[i].role) == "assistant") {
+            // seed the assistant turn (prefill), leaving it open to continue
+            prompt_str += "assistant: " + std::string(chat[i].content);
+        } else {
+            prompt_str += std::string(chat[i].role) + ": " + std::string(chat[i].content) + "\n";
+        }
+    }
+    if (n_msg == 0 || std::string(chat[n_msg - 1].role) != "assistant") {
+        prompt_str += "assistant: ";
+    }
+}
 
 // RELEASE MEMORY AFTER THE PROMPT IS FULLY FORMATTED
 for (int i = 0; i < n_msg; ++i) {
@@ -346,7 +419,13 @@ llama_sampler * smpl = llama_sampler_chain_init(sparams);
 llama_sampler_chain_add(smpl, llama_sampler_init_temp(temperature));
 llama_sampler_chain_add(smpl, llama_sampler_init_top_k(top_k));
 llama_sampler_chain_add(smpl, llama_sampler_init_top_p(top_p, 1));
-llama_sampler_chain_add(smpl, llama_sampler_init_penalties(128, 1.2f, 0.1f, 0.1f));
+// Repetition penalty is caller-configurable: structured/list output (e.g. a JSON
+// array of similar objects) is hurt by it — the repeated structural tokens get
+// penalised, so the model emits fewer items and stops early. When the penalty is
+// effectively off, skip the sampler entirely.
+if (repeat_penalty > 1.0f || freq_penalty != 0.0f || presence_penalty != 0.0f) {
+    llama_sampler_chain_add(smpl, llama_sampler_init_penalties(penalty_last_n, repeat_penalty, freq_penalty, presence_penalty));
+}
 llama_sampler_chain_add(smpl, llama_sampler_init_dist(42));
 
 int n_cur = 0;

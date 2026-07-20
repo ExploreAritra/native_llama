@@ -16,6 +16,16 @@ set(LLAMA_BUILD_TESTS OFF CACHE BOOL "Disable tests" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "Disable examples" FORCE)
 set(LLAMA_BUILD_SERVER OFF CACHE BOOL "Disable server" FORCE)
 
+# We link against llama.cpp's `common` library (common_chat_* / chat templates),
+# but it defaults to LLAMA_STANDALONE (OFF here, since llama.cpp is added via
+# add_subdirectory). Force it on so libcommon is built and -lcommon resolves.
+set(LLAMA_BUILD_COMMON ON CACHE BOOL "Build common utils library" FORCE)
+
+# `common` optionally links libcurl (for downloading models from a URL), which
+# isn't available in the Android NDK sysroot. We download models ourselves, so
+# disable it to avoid an unresolved libcurl dependency.
+set(LLAMA_CURL OFF CACHE BOOL "Disable libcurl model download" FORCE)
+
 # --- Force compiler to ignore hardware audio frameworks ---
 add_definitions(-DMA_NO_OPENSL=1)
 add_definitions(-DMA_NO_AAUDIO=1)
@@ -75,5 +85,7 @@ target_include_directories(native_llama PRIVATE
 )
 
 find_library(log-lib log)
-# Link against the locally built llama library
-target_link_libraries(native_llama llama dl vulkan ${log-lib})
+# Link against the locally built llama library. `llama-common` provides the
+# common_chat_* (Jinja chat-template) symbols used by startGeneration. NOTE:
+# newer llama.cpp renamed the old `common` target to `llama-common`.
+target_link_libraries(native_llama llama llama-common dl vulkan ${log-lib})

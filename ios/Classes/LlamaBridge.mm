@@ -8,6 +8,7 @@
 // --- MTMD Headers ---
 #import "mtmd.h"
 #import "mtmd-helper.h"
+#import "chat.h"  // common_chat_* — Jinja chat-template formatting (like mtmd-cli)
 
 @implementation LlamaBridge {
     llama_model *model;
@@ -16,6 +17,8 @@
     llama_context *ctx_draft;
     mtmd_context *mtmd_ctx;
     bool stop_generation;
+    volatile bool is_generating;
+    int32_t active_n_ctx; // resolved context window of the live ctx (for resetContext)
 }
 
 + (instancetype)shared {
@@ -30,6 +33,14 @@
 - (instancetype)init {
     self = [super init];
     if (self) {
+        // Disable ggml-metal's new "tensor API" matmul path. It is enabled by
+        // default on A19/M5-class GPUs but miscomputes the Qwen2.5-VL vision
+        // encoder there, making on-device document extraction return all-empty
+        // fields. Forcing the mature simdgroup path (what every other GPU uses)
+        // restores correct output at full GPU speed. Must be set before the Metal
+        // device is initialized (i.e. before llama_backend_init). Harmless on
+        // non-Metal backends (Android/Vulkan just ignores it).
+        setenv("GGML_METAL_TENSOR_DISABLE", "1", 1);
         llama_backend_init();
         ggml_backend_load_all();
         model = nullptr;
@@ -38,6 +49,8 @@
         ctx_draft = nullptr;
         mtmd_ctx = nullptr;
         stop_generation = false;
+        is_generating = false;
+        active_n_ctx = 0;
     }
     return self;
 }
@@ -90,6 +103,40 @@
         model = nullptr;
         return NO;
     }
+    active_n_ctx = cparams.n_ctx; // remember for a later resetContext
+    return YES;
+}
+
+// Recreate ONLY the llama context, keeping the model weights and the mtmd vision
+// projector resident. A fresh context resets the KV cache and the M-RoPE
+// position state, so the next generation (e.g. the next page image) starts clean
+// WITHOUT the multi-GB weight + projector reload that dispose + initModel costs.
+// This is the safe, cheap way to read several images in sequence: llama.cpp's
+// per-generation llama_memory_clear does not reliably reset M-RoPE positions on
+// a reused vision context after a large/aborted decode, which corrupts the
+// backend; a brand-new context does.
+- (BOOL)resetContext:(int)nCtx {
+    if (model == nullptr) return NO; // nothing loaded — caller falls back
+    if (is_generating) return NO;    // never free a context mid-decode
+
+    if (ctx != nullptr) {
+        llama_free(ctx);
+        ctx = nullptr;
+    }
+
+    // Rebuild the context params EXACTLY as initModel did (same KV quantisation,
+    // batch, embeddings), reusing the resolved window unless the caller overrides.
+    auto cparams = llama_context_default_params();
+    cparams.n_threads = 4;
+    cparams.embeddings = true;
+    cparams.type_k = GGML_TYPE_Q8_0;
+    cparams.type_v = GGML_TYPE_Q8_0;
+    cparams.n_batch = 128;
+    cparams.n_ctx = nCtx > 0 ? nCtx : (active_n_ctx > 0 ? active_n_ctx : 4096);
+
+    ctx = llama_init_from_model(model, cparams);
+    if (ctx == nullptr) return NO;
+    active_n_ctx = cparams.n_ctx;
     return YES;
 }
 
@@ -105,7 +152,31 @@
     }
 
     mtmd_context_params mtmd_params = mtmd_context_params_default();
+    // Vision encoder on the GPU (Metal). The real fix for the all-empty on-device
+    // extraction is NOT here — it's the GGML_METAL_TENSOR_DISABLE setenv in -init.
+    // On A19/M5-class GPUs ggml-metal enables a brand-new "tensor API" matmul path
+    // that miscomputes the Qwen2.5-VL vision graph: the image decodes, the LLM even
+    // sees the coarse page structure, but the embeddings are garbage so every field
+    // reads back "". The mature simdgroup path (every other GPU, incl. Macs and the
+    // A19 once the tensor API is off) is correct. Verified: identical vendored code
+    // reads this exact Form 16 correctly on macOS Metal; the device (Apple A19 Pro,
+    // has_tensor=true) is the only config that fails.
+    // Do NOT switch this to CPU (use_gpu=false) as a workaround: it reads correctly
+    // but takes >15 min per page on the device.
     mtmd_params.use_gpu = true;
+    // Disable flash attention in the vision encoder. clip's attention defaults to
+    // AUTO→ENABLED, i.e. ggml_flash_attn_ext, whose Metal kernel is the most
+    // complex op in the vision graph and the prime suspect for the A19's garbage
+    // embeddings (the mundane simdgroup matmul path is already correct once the
+    // tensor API is off). Forcing plain softmax+matmul attention here trades a
+    // little speed for the robust, well-exercised kernels. Metal-only concern;
+    // Vulkan/CPU are unaffected by the value.
+    mtmd_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+    // Cap vision tokens per image. Full-page document reads (Qwen2.5-VL) need
+    // enough vision tokens to keep fine print legible; 1536 handles a dense A4
+    // page without tiling. (image_min_tokens keeps small crops legible.)
+    mtmd_params.image_max_tokens = 1536;
+    mtmd_params.image_min_tokens = 256;
 
     mtmd_ctx = mtmd_init_from_file(path, model, mtmd_params);
 
@@ -191,56 +262,100 @@
     return result;
 }
 
-- (void)startGenerationWithRoles:(NSArray<NSString *> *)roles contents:(NSArray<NSString *> *)contents mediaPaths:(NSArray<NSString *> *)mediaPaths temperature:(float)temperature topK:(int)topK topP:(float)topP onToken:(void (^)(NSString *))onToken {
+struct GenerationGuard {
+    volatile bool *flag;
+    GenerationGuard(volatile bool *f) : flag(f) { *flag = true; }
+    ~GenerationGuard() { if (flag) *flag = false; }
+};
+
+- (void)startGenerationWithRoles:(NSArray<NSString *> *)roles contents:(NSArray<NSString *> *)contents mediaPaths:(NSArray<NSString *> *)mediaPaths temperature:(float)temperature topK:(int)topK topP:(float)topP repeatPenalty:(float)repeatPenalty penaltyLastN:(int)penaltyLastN freqPenalty:(float)freqPenalty presencePenalty:(float)presencePenalty onToken:(void (^)(NSString *))onToken {
     if (ctx == nullptr || model == nullptr) return;
+    GenerationGuard guard(&is_generating);
     stop_generation = false;
     const struct llama_vocab * vocab = llama_model_get_vocab(model);
 
     // --- CRITICAL FIX: Only use the draft model if NO media is attached ---
     bool use_draft = (ctx_draft != nullptr && (mediaPaths == nil || mediaPaths.count == 0));
 
-    llama_memory_seq_rm(llama_get_memory(ctx), -1, -1, -1);
-    if (use_draft) llama_memory_seq_rm(llama_get_memory(ctx_draft), -1, -1, -1);
+    // Reset context between generations. A partial seq_rm(-1,-1,-1) does NOT
+    // reset the cell tails of recurrent/hybrid models (e.g. Qwen3-Next / Mamba),
+    // which then trips `GGML_ASSERT(cell.has_seq_id(seq_id))` in
+    // llama_memory_recurrent::find_slot on the next decode. llama_memory_clear
+    // fully resets both transformer KV and recurrent state.
+    llama_memory_clear(llama_get_memory(ctx), true);
+    if (use_draft) llama_memory_clear(llama_get_memory(ctx_draft), true);
 
     uint32_t n_batch_size = llama_n_batch(ctx);
     if (use_draft) { n_batch_size = MIN(n_batch_size, llama_n_batch(ctx_draft)); }
 
-    std::vector<llama_chat_message> chat;
-    for (NSUInteger i = 0; i < roles.count; i++) {
-        chat.push_back({
-                               .role = [roles[i] UTF8String],
-                               .content = [contents[i] UTF8String]
-                       });
-    }
-
-    char tmpl[2048];
-    int32_t tmpl_len = llama_model_meta_val_str(model, "tokenizer.chat_template", tmpl, sizeof(tmpl));
-    const char* tmpl_ptr = (tmpl_len > 0) ? tmpl : nullptr;
-
-    int32_t n_formatted = llama_chat_apply_template(tmpl_ptr, chat.data(), chat.size(), true, nullptr, 0);
-    std::vector<char> formatted_prompt;
-    if (n_formatted > 0) {
-        formatted_prompt.resize(n_formatted + 1);
-        llama_chat_apply_template(tmpl_ptr, chat.data(), chat.size(), true, formatted_prompt.data(), formatted_prompt.size());
-    } else {
-        std::string s = "";
-        for (auto &msg : chat) {
-            s += std::string(msg.role) + ": " + std::string(msg.content) + "\n";
+    // Format the prompt with the model's OWN chat template via the Jinja
+    // (common_chat) path — the same one mtmd-cli uses. The C-API
+    // llama_chat_apply_template does NOT honor custom templates like
+    // NuExtract3's (which frames the extraction task and enables the model's
+    // thinking), which produced hallucinated, task-less output. use_jinja=true
+    // fixes that. Falls back to a plain role/content concatenation if the
+    // template can't be applied.
+    std::string prompt_str;
+    try {
+        common_chat_templates_ptr tmpls = common_chat_templates_init(model, "");
+        common_chat_templates_inputs inputs;
+        inputs.use_jinja = true;
+        inputs.add_generation_prompt = true;
+        // Thinking ON: NuExtract3 appears to need its reasoning step to actually
+        // READ the page (accurate only with thinking on in testing). The Dart
+        // layer bounds runaway generation with a hard token cap + stop-on-JSON,
+        // so this can't ramble indefinitely.
+        inputs.enable_thinking = true;
+        // Assistant prefill: a trailing message with role "assistant" is NOT a
+        // completed turn — it's a seed the model must CONTINUE (e.g. "{" to force
+        // an immediate JSON reply from a model that would otherwise think out
+        // loud). Rendering it through the template would close the turn with an
+        // EOS/<|im_end|>, so instead we keep add_generation_prompt=true (prompt
+        // ends at the open assistant turn) and append the seed text afterwards.
+        NSUInteger n_msg = roles.count;
+        std::string assistant_prefix;
+        if (n_msg > 0 && [roles[n_msg - 1] isEqualToString:@"assistant"]) {
+            assistant_prefix = std::string([contents[n_msg - 1] UTF8String]);
+            n_msg -= 1; // don't feed the seed to the template
         }
-        s += "assistant: ";
-        formatted_prompt.assign(s.begin(), s.end());
-        formatted_prompt.push_back('\0');
-        n_formatted = (int32_t)s.length();
+        for (NSUInteger i = 0; i < n_msg; i++) {
+            common_chat_msg m;
+            m.role = [roles[i] UTF8String];
+            m.content = [contents[i] UTF8String];
+            inputs.messages.push_back(m);
+        }
+        common_chat_params cparams = common_chat_templates_apply(tmpls.get(), inputs);
+        prompt_str = cparams.prompt + assistant_prefix;
+    } catch (const std::exception & e) {
+        NSLog(@"common_chat template apply failed (%s) — falling back", e.what());
     }
-
-    std::string prompt_str = formatted_prompt.data();
+    if (prompt_str.empty()) {
+        for (NSUInteger i = 0; i < roles.count; i++) {
+            if (i + 1 == roles.count && [roles[i] isEqualToString:@"assistant"]) {
+                // seed the assistant turn (prefill), leaving it open to continue
+                prompt_str += "assistant: " + std::string([contents[i] UTF8String]);
+            } else {
+                prompt_str += std::string([roles[i] UTF8String]) + ": " +
+                              std::string([contents[i] UTF8String]) + "\n";
+            }
+        }
+        if (roles.count == 0 || ![roles[roles.count - 1] isEqualToString:@"assistant"]) {
+            prompt_str += "assistant: ";
+        }
+    }
 
     auto sparams = llama_sampler_chain_default_params();
     llama_sampler * smpl = llama_sampler_chain_init(sparams);
     llama_sampler_chain_add(smpl, llama_sampler_init_temp(temperature));
     llama_sampler_chain_add(smpl, llama_sampler_init_top_k(topK));
     llama_sampler_chain_add(smpl, llama_sampler_init_top_p(topP, 1));
-    llama_sampler_chain_add(smpl, llama_sampler_init_penalties(128, 1.2f, 0.1f, 0.1f));
+    // Repetition penalty is caller-configurable: structured/list output (e.g. a
+    // JSON array of similar objects) is hurt by it — the repeated structural
+    // tokens get penalised, so the model emits fewer items and stops early. When
+    // the penalty is effectively off, skip the sampler entirely.
+    if (repeatPenalty > 1.0f || freqPenalty != 0.0f || presencePenalty != 0.0f) {
+        llama_sampler_chain_add(smpl, llama_sampler_init_penalties(penaltyLastN, repeatPenalty, freqPenalty, presencePenalty));
+    }
     llama_sampler_chain_add(smpl, llama_sampler_init_dist(42));
 
     int n_cur = 0;
@@ -457,6 +572,10 @@
 }
 
 - (void)unload {
+    stop_generation = true;
+    while (is_generating) {
+        [NSThread sleepForTimeInterval:0.01];
+    }
     if (ctx) { llama_free(ctx); ctx = nullptr; }
     if (model) { llama_model_free(model); model = nullptr; }
     if (ctx_draft) { llama_free(ctx_draft); ctx_draft = nullptr; }
