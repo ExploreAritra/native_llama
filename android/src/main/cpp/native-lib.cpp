@@ -19,6 +19,18 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
+// Forward llama.cpp / ggml internal diagnostics to logcat. Without this, all of
+// llama.cpp's own logging (Vulkan device detection, "offloaded X/Y layers to
+// GPU", per-backend buffer sizes, per-token timings) is written to stderr and
+// silently dropped by Android. Routed under the LLAMA_CPP tag so it can be
+// filtered separately from this bridge's own NATIVE_LLAMA_JNI messages.
+static void llama_to_logcat(ggml_log_level level, const char *text, void * /*user*/) {
+    int prio = level == GGML_LOG_LEVEL_ERROR ? ANDROID_LOG_ERROR
+             : level == GGML_LOG_LEVEL_WARN  ? ANDROID_LOG_WARN
+             : ANDROID_LOG_INFO;
+    __android_log_print(prio, "LLAMA_CPP", "%s", text);
+}
+
 static llama_model * model = nullptr;
 static llama_context * ctx = nullptr;
 static llama_model * model_draft = nullptr;
@@ -76,6 +88,11 @@ Java_com_timebox_native_1llama_NativeLlamaPlugin_initLlama(JNIEnv *env, jobject 
     if (ctx) { llama_free(ctx); ctx = nullptr; }
     if (model) { llama_model_free(model); model = nullptr; }
 
+    // Route llama.cpp + ggml logs to logcat (LLAMA_CPP tag) so the Vulkan device
+    // detection and layer-offload lines are visible for GPU-acceleration debugging.
+    llama_log_set(llama_to_logcat, nullptr);
+    ggml_log_set(llama_to_logcat, nullptr);
+
     llama_backend_init();
     ggml_backend_load_all();
 
@@ -83,6 +100,19 @@ Java_com_timebox_native_1llama_NativeLlamaPlugin_initLlama(JNIEnv *env, jobject 
     mparams.n_gpu_layers = n_gpu_layers;
 
     model = llama_model_load_from_file(path, mparams);
+
+    // GPU -> CPU fallback (model load). When a GPU offload is requested but the
+    // model fails to load, retry once forcing CPU-only. This rescues the case
+    // where a Vulkan device IS present but the GPU load fails (out-of-memory,
+    // driver/shader error). The other case -- no usable Vulkan device at all --
+    // does NOT hit this path: ggml already keeps all layers on the CPU and the
+    // load succeeds. mparams.n_gpu_layers is left at 0 so the context below is
+    // built for the CPU too.
+    if (model == nullptr && n_gpu_layers != 0) {
+        LOGE("GPU model load failed; falling back to CPU (n_gpu_layers=0)");
+        mparams.n_gpu_layers = 0;
+        model = llama_model_load_from_file(path, mparams);
+    }
 
     if (model == nullptr) {
         LOGE("Failed to load model: %s", path);
@@ -105,9 +135,25 @@ Java_com_timebox_native_1llama_NativeLlamaPlugin_initLlama(JNIEnv *env, jobject 
     }
 
     ctx = llama_init_from_model(model, cparams);
+
+    // GPU -> CPU fallback (context/KV allocation). If the model loaded on the
+    // GPU but the context failed -- typically the KV cache + compute buffers
+    // couldn't be allocated on the GPU -- reload the whole model on CPU (its
+    // tensors are already on the GPU, so they must be re-placed) and rebuild the
+    // context. mparams.n_gpu_layers != 0 means the model above loaded on the GPU.
+    if (ctx == nullptr && mparams.n_gpu_layers != 0) {
+        LOGE("GPU context creation failed; reloading model on CPU");
+        llama_model_free(model);
+        mparams.n_gpu_layers = 0;
+        model = llama_model_load_from_file(path, mparams);
+        if (model != nullptr) {
+            ctx = llama_init_from_model(model, cparams);
+        }
+    }
+
     if (ctx == nullptr) {
         LOGE("Failed to create context");
-        llama_model_free(model);
+        if (model) { llama_model_free(model); }
         model = nullptr;
         env->ReleaseStringUTFChars(model_path, path);
         return JNI_FALSE;
