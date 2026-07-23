@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <cstdint>
 #include <android/log.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -337,21 +338,85 @@ Java_com_timebox_native_1llama_NativeLlamaPlugin_getEmbedding(JNIEnv *env, jobje
     return result;
 }
 
+// Accumulates raw token bytes across sendToken() calls so multi-byte UTF-8
+// characters that llama.cpp splits across tokens (emoji, CJK, smart quotes) are
+// only handed to Java once complete. Reset at the start of every generation.
+static std::string g_token_utf8_buf;
+
+// Length of the longest prefix of [s] that ends on a UTF-8 character boundary,
+// i.e. excluding a trailing INCOMPLETE multi-byte sequence (the first bytes of a
+// character whose remaining bytes are in the next token). Returns s.size() when
+// the string already ends cleanly.
+static size_t utf8_complete_prefix_len(const std::string &s) {
+    const size_t n = s.size();
+    if (n == 0) return 0;
+    // Find the lead byte of the final sequence (skip back over 10xxxxxx bytes).
+    size_t start = n - 1;
+    while (start > 0 && ((unsigned char)s[start] & 0xC0) == 0x80) start--;
+    const unsigned char lead = (unsigned char)s[start];
+    size_t expected;
+    if ((lead & 0x80) == 0x00) expected = 1;        // 0xxxxxxx
+    else if ((lead & 0xE0) == 0xC0) expected = 2;   // 110xxxxx
+    else if ((lead & 0xF0) == 0xE0) expected = 3;   // 1110xxxx
+    else if ((lead & 0xF8) == 0xF0) expected = 4;   // 11110xxx
+    else expected = 1;                              // invalid lead → emit as-is
+    const size_t avail = n - start;
+    return (avail >= expected) ? n : start; // hold back an incomplete final char
+}
+
+// Converts complete UTF-8 to UTF-16 (with surrogate pairs for astral chars like
+// emoji). Needed because JNI NewStringUTF requires *Modified* UTF-8 and aborts on
+// standard 4-byte sequences; NewString(jchar*) has no such restriction.
+static std::vector<jchar> utf8_to_utf16(const std::string &s) {
+    std::vector<jchar> out;
+    out.reserve(s.size());
+    size_t i = 0;
+    const size_t n = s.size();
+    while (i < n) {
+        const unsigned char c = (unsigned char)s[i];
+        uint32_t cp;
+        size_t len;
+        if ((c & 0x80) == 0x00) { cp = c; len = 1; }
+        else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; len = 2; }
+        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; len = 3; }
+        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; len = 4; }
+        else { i++; continue; } // invalid lead byte → skip
+        if (i + len > n) break; // safety (prefix should be complete)
+        for (size_t k = 1; k < len; k++) cp = (cp << 6) | ((unsigned char)s[i + k] & 0x3F);
+        i += len;
+        if (cp <= 0xFFFF) {
+            out.push_back((jchar)cp);
+        } else {
+            cp -= 0x10000;
+            out.push_back((jchar)(0xD800 + (cp >> 10)));
+            out.push_back((jchar)(0xDC00 + (cp & 0x3FF)));
+        }
+    }
+    return out;
+}
+
 static bool sendToken(JNIEnv *env, jobject thiz, jmethodID methodID, const struct llama_vocab * vocab, llama_token token, bool &is_eog_out) {
     char buf[128];
     int n = llama_token_to_piece(vocab, token, buf, sizeof(buf), 0, true);
-    if (n > 0) {
-        std::string s(buf, n);
-        if (s == "</s>" || s == "<|im_end|>" || s == "<|end|>") {
-            is_eog_out = true;
-            return false;
-        }
-        jstring js = env->NewStringUTF(s.c_str());
-        env->CallVoidMethod(thiz, methodID, js);
-        env->DeleteLocalRef(js);
-        return true;
+    if (n <= 0) return false;
+    std::string s(buf, n);
+    if (s == "</s>" || s == "<|im_end|>" || s == "<|end|>") {
+        is_eog_out = true;
+        return false;
     }
-    return false;
+    // Buffer, then emit only whole UTF-8 characters. Prevents the JNI abort
+    // ("input is not valid Modified UTF-8") when an emoji/multi-byte char is
+    // split across tokens or uses a 4-byte sequence.
+    g_token_utf8_buf += s;
+    const size_t emitLen = utf8_complete_prefix_len(g_token_utf8_buf);
+    if (emitLen == 0) return true; // nothing complete yet — wait for more bytes
+    const std::string piece = g_token_utf8_buf.substr(0, emitLen);
+    g_token_utf8_buf.erase(0, emitLen);
+    const std::vector<jchar> u16 = utf8_to_utf16(piece);
+    jstring js = env->NewString(u16.data(), (jsize)u16.size());
+    env->CallVoidMethod(thiz, methodID, js);
+    env->DeleteLocalRef(js);
+    return true;
 }
 
 JNIEXPORT void JNICALL
@@ -359,6 +424,7 @@ Java_com_timebox_native_1llama_NativeLlamaPlugin_startNativeGeneration(JNIEnv *e
 if (ctx == nullptr || model == nullptr) return;
 
 stop_generation = false;
+g_token_utf8_buf.clear(); // fresh UTF-8 reassembly buffer per generation
 jclass clazz = env->GetObjectClass(thiz);
 jmethodID methodID = env->GetMethodID(clazz, "onTokenReceived", "(Ljava/lang/String;)V");
 

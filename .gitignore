@@ -31,4 +31,11 @@ migrate_working_dir/
 .flutter-plugins-dependencies
 /build/
 /coverage/
+
+# Native (CMake/Gradle) build output for the Android plugin
+.cxx/
+**/.cxx/
+android/build/
+android/.gradle/
+*.tmp
 ios/shared_cpp/ggml/src/ggml-metal/nl-ggml-metal.metal
