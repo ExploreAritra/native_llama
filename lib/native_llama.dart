@@ -127,8 +127,8 @@ class NativeLlama {
         subscription?.cancel();
       };
 
-      final roles = messages.map((m) => m['role']!).toList();
-      final contents = messages.map((m) => m['text']!).toList();
+      final roles = messages.map((m) => m['role'] ?? 'user').toList();
+      final contents = messages.map((m) => m['content'] ?? m['text'] ?? '').toList();
 
       _methodChannel.invokeMethod('startGeneration', {
         'roles': roles,
