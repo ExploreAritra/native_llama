@@ -420,7 +420,7 @@ static bool sendToken(JNIEnv *env, jobject thiz, jmethodID methodID, const struc
 }
 
 JNIEXPORT void JNICALL
-Java_com_timebox_native_1llama_NativeLlamaPlugin_startNativeGeneration(JNIEnv *env, jobject thiz, jobjectArray roles, jobjectArray contents, jobjectArray media_paths, jfloat temperature, jint top_k, jfloat top_p, jfloat repeat_penalty, jint penalty_last_n, jfloat freq_penalty, jfloat presence_penalty) {
+Java_com_timebox_native_1llama_NativeLlamaPlugin_startNativeGeneration(JNIEnv *env, jobject thiz, jobjectArray roles, jobjectArray contents, jobjectArray media_paths, jfloat temperature, jint top_k, jfloat top_p, jfloat repeat_penalty, jint penalty_last_n, jfloat freq_penalty, jfloat presence_penalty, jstring grammar) {
 if (ctx == nullptr || model == nullptr) return;
 
 stop_generation = false;
@@ -528,6 +528,29 @@ env->DeleteLocalRef(stored_jcontents[i]);
 
 auto sparams = llama_sampler_chain_default_params();
 llama_sampler * smpl = llama_sampler_chain_init(sparams);
+
+// Optional GBNF grammar. Added FIRST so it masks every token the grammar
+// forbids before temperature/top-k/top-p ever see the distribution; putting it
+// later would let those samplers pick from candidates the grammar has already
+// ruled out. With a grammar attached, malformed structured output stops being
+// something the caller has to parse defensively — it becomes impossible.
+//
+// A grammar that fails to parse returns NULL. That is treated as "no grammar"
+// rather than a fatal error: an unconstrained answer the caller can still
+// validate beats refusing to generate at all.
+if (grammar != nullptr) {
+    const char * grammar_str = env->GetStringUTFChars(grammar, nullptr);
+    if (grammar_str != nullptr && grammar_str[0] != '\0') {
+        llama_sampler * gsmpl = llama_sampler_init_grammar(vocab, grammar_str, "root");
+        if (gsmpl != nullptr) {
+            llama_sampler_chain_add(smpl, gsmpl);
+        } else {
+            LOGE("Grammar failed to parse; continuing unconstrained");
+        }
+    }
+    if (grammar_str != nullptr) env->ReleaseStringUTFChars(grammar, grammar_str);
+}
+
 llama_sampler_chain_add(smpl, llama_sampler_init_temp(temperature));
 llama_sampler_chain_add(smpl, llama_sampler_init_top_k(top_k));
 llama_sampler_chain_add(smpl, llama_sampler_init_top_p(top_p, 1));

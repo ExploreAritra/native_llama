@@ -268,7 +268,7 @@ struct GenerationGuard {
     ~GenerationGuard() { if (flag) *flag = false; }
 };
 
-- (void)startGenerationWithRoles:(NSArray<NSString *> *)roles contents:(NSArray<NSString *> *)contents mediaPaths:(NSArray<NSString *> *)mediaPaths temperature:(float)temperature topK:(int)topK topP:(float)topP repeatPenalty:(float)repeatPenalty penaltyLastN:(int)penaltyLastN freqPenalty:(float)freqPenalty presencePenalty:(float)presencePenalty onToken:(void (^)(NSString *))onToken {
+- (void)startGenerationWithRoles:(NSArray<NSString *> *)roles contents:(NSArray<NSString *> *)contents mediaPaths:(NSArray<NSString *> *)mediaPaths temperature:(float)temperature topK:(int)topK topP:(float)topP repeatPenalty:(float)repeatPenalty penaltyLastN:(int)penaltyLastN freqPenalty:(float)freqPenalty presencePenalty:(float)presencePenalty grammar:(NSString *)grammar onToken:(void (^)(NSString *))onToken {
     if (ctx == nullptr || model == nullptr) return;
     GenerationGuard guard(&is_generating);
     stop_generation = false;
@@ -346,6 +346,23 @@ struct GenerationGuard {
 
     auto sparams = llama_sampler_chain_default_params();
     llama_sampler * smpl = llama_sampler_chain_init(sparams);
+
+    // Optional GBNF grammar. Added FIRST so it masks every token the grammar
+    // forbids before temperature/top-k/top-p see the distribution; later in the
+    // chain those samplers could pick a candidate the grammar has ruled out.
+    // A grammar that fails to parse returns NULL and is treated as "no grammar"
+    // — an unconstrained answer the caller can still validate beats refusing to
+    // generate at all.
+    if (grammar != nil && grammar.length > 0) {
+        const llama_vocab * gvocab = llama_model_get_vocab(model);
+        llama_sampler * gsmpl = llama_sampler_init_grammar(gvocab, [grammar UTF8String], "root");
+        if (gsmpl != nullptr) {
+            llama_sampler_chain_add(smpl, gsmpl);
+        } else {
+            NSLog(@"[LlamaBridge] Grammar failed to parse; continuing unconstrained");
+        }
+    }
+
     llama_sampler_chain_add(smpl, llama_sampler_init_temp(temperature));
     llama_sampler_chain_add(smpl, llama_sampler_init_top_k(topK));
     llama_sampler_chain_add(smpl, llama_sampler_init_top_p(topP, 1));

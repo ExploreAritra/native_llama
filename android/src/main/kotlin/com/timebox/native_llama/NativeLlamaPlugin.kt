@@ -38,7 +38,7 @@ class NativeLlamaPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHa
     private external fun getEmbedding(text: String): DoubleArray?
 
     // --- MODIFIED: Renamed imagePaths to mediaPaths ---
-    private external fun startNativeGeneration(roles: Array<String>, contents: Array<String>, mediaPaths: Array<String>, temperature: Float, topK: Int, topP: Float, repeatPenalty: Float, penaltyLastN: Int, freqPenalty: Float, presencePenalty: Float)
+    private external fun startNativeGeneration(roles: Array<String>, contents: Array<String>, mediaPaths: Array<String>, temperature: Float, topK: Int, topP: Float, repeatPenalty: Float, penaltyLastN: Int, freqPenalty: Float, presencePenalty: Float, grammar: String?)
 
     private external fun abortGeneration()
 
@@ -129,10 +129,12 @@ class NativeLlamaPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHa
                 val penaltyLastN = call.argument<Int>("penaltyLastN") ?: 128
                 val freqPenalty = call.argument<Double>("freqPenalty")?.toFloat() ?: 0.1f
                 val presencePenalty = call.argument<Double>("presencePenalty")?.toFloat() ?: 0.1f
+                // Optional GBNF grammar; null means unconstrained sampling.
+                val grammar = call.argument<String>("grammar")
 
                 if (roles != null && contents != null) {
                     executor.execute {
-                        startNativeGeneration(roles, contents, mediaPaths, temperature, topK, topP, repeatPenalty, penaltyLastN, freqPenalty, presencePenalty)
+                        startNativeGeneration(roles, contents, mediaPaths, temperature, topK, topP, repeatPenalty, penaltyLastN, freqPenalty, presencePenalty, grammar)
                     }
                     result.success(null)
                 } else {

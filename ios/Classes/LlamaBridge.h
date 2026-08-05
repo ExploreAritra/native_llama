@@ -23,6 +23,7 @@ NS_ASSUME_NONNULL_BEGIN
         penaltyLastN:(int)penaltyLastN
         freqPenalty:(float)freqPenalty
         presencePenalty:(float)presencePenalty
+        grammar:(NSString * _Nullable)grammar
         onToken:(void (^)(NSString * _Nullable))onToken;
 
 - (int)getCpuCores:(BOOL)performanceOnly;

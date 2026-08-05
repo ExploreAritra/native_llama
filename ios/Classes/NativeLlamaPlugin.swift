@@ -90,6 +90,8 @@ public class NativeLlamaPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             let penaltyLastN = args["penaltyLastN"] as? Int ?? 128
             let freqPenalty = (args["freqPenalty"] as? NSNumber)?.floatValue ?? 0.1
             let presencePenalty = (args["presencePenalty"] as? NSNumber)?.floatValue ?? 0.1
+            // Optional GBNF grammar; nil means unconstrained sampling.
+            let grammar = args["grammar"] as? String
 
             // Prevent screen from sleeping during long generations
             UIApplication.shared.isIdleTimerDisabled = true
@@ -105,7 +107,8 @@ public class NativeLlamaPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                                                      repeatPenalty: repeatPenalty,
                                                      penaltyLastN: Int32(penaltyLastN),
                                                      freqPenalty: freqPenalty,
-                                                     presencePenalty: presencePenalty) { [weak self] token in
+                                                     presencePenalty: presencePenalty,
+                                                     grammar: grammar) { [weak self] token in
                     guard let token = token else { return }
                     DispatchQueue.main.async {
                         if token == "__END_OF_STREAM__" {

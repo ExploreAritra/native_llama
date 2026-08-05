@@ -95,6 +95,15 @@ class NativeLlama {
         int penaltyLastN = 128,
         double freqPenalty = 0.1,
         double presencePenalty = 0.1,
+        /// Optional GBNF grammar constraining the output.
+        ///
+        /// When supplied, the backend masks every token the grammar forbids
+        /// before temperature/top-k/top-p are applied, so structurally invalid
+        /// output becomes impossible rather than merely unlikely — worth far
+        /// more than prompt instructions for JSON or fixed-format replies. The
+        /// start symbol must be named `root`. A grammar that fails to parse is
+        /// ignored and generation continues unconstrained.
+        String? grammar,
       }) {
     if (!_isInitialized) {
       return Stream.error("Model not initialized");
@@ -141,6 +150,7 @@ class NativeLlama {
         'penaltyLastN': penaltyLastN,
         'freqPenalty': freqPenalty,
         'presencePenalty': presencePenalty,
+        'grammar': grammar,
       }).catchError((e) {
         if (!controller.isClosed) controller.addError(e);
       });
