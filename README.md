@@ -71,6 +71,42 @@ llama.generateResponse(
 });
 ```
 
+### KV Prefix Reuse (automatic)
+
+Repeated `generateResponse` calls re-prefill only what changed. A chat turn
+re-sends the whole conversation, so without this every turn recomputes thousands
+of tokens the KV cache already holds — which is most of the time-to-first-token.
+
+Nothing to enable. To benefit, order the prompt **most-stable-content-first**:
+
+```
+system rules → persona → world state → retrieved context → turns → the ask
+└───────────────── reused across turns ─────────────────┘ └── re-prefilled ──┘
+```
+
+Changing an early message invalidates everything after it. Where content varies
+per turn, append it to the last user message rather than splicing it into a
+system block up front.
+
+Reuse is skipped (the context starts clean) for vision calls, when a draft model
+is loaded, and after `resetContext()` / `dispose()`. Note that passing a
+`grammar` already disables drafting, so grammared calls keep reuse.
+
+**Correctness on recurrent/hybrid models.** Architectures such as Mamba, RWKV and
+**LFM2** hold a rolling window per layer rather than per-position state, so their
+cache cannot be rewound — `llama_memory_recurrent::seq_rm` refuses a partial
+truncation rather than corrupt itself. Only *pure append* (the cache is a strict
+prefix of the new prompt) is reused there; anything divergent falls back to a
+full, correct prefill. Behaviour is identical either way — only speed changes.
+
+The planner lives in `ios/shared_cpp/common/nl-kv-reuse.h`, is shared by both
+platforms, and is covered by `test/nl_kv_reuse_test.cpp`:
+
+```bash
+c++ -std=c++17 -I ios/shared_cpp/include -I ios/shared_cpp/ggml/include \
+    -I ios/shared_cpp/common test/nl_kv_reuse_test.cpp -o /tmp/t && /tmp/t
+```
+
 ### Speculative Decoding
 ```dart
 await llama.initDraftModel("/path/to/small_draft_model.gguf");

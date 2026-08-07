@@ -15,6 +15,7 @@
 #include "mtmd.h"
 #include "mtmd-helper.h"
 #include "chat.h"  // common_chat_* — Jinja chat-template formatting (like mtmd-cli)
+#include "nl-kv-reuse.h"  // KV prefix reuse planning, shared with the iOS bridge
 
 #define TAG "NATIVE_LLAMA_JNI"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -39,6 +40,21 @@ static llama_context * ctx_draft = nullptr;
 static mtmd_context * mtmd_ctx = nullptr;
 static bool stop_generation = false;
 static int32_t active_n_ctx = 0; // resolved context window of the live ctx (for resetContext)
+
+/// The exact token sequence currently held in the KV cache at seq 0, positions
+/// 0..size()-1 — prompt tokens plus every token decoded back into the context
+/// during generation.
+///
+/// This is what makes prefix reuse possible: on the next call we compare the new
+/// prompt against it and skip re-prefilling the shared head. Kept exact, because
+/// a wrong entry here means generating from a corrupted context, which is far
+/// worse than a slow prefill. Any path that moves the cache in a way this vector
+/// cannot mirror must call invalidate_prefix_cache().
+static std::vector<llama_token> cached_tokens;
+
+static void invalidate_prefix_cache() {
+    cached_tokens.clear();
+}
 
 double getPhysicalMemoryGB() {
     long pages = sysconf(_SC_PHYS_PAGES);
@@ -86,6 +102,7 @@ Java_com_timebox_native_1llama_NativeLlamaPlugin_initLlama(JNIEnv *env, jobject 
         return JNI_FALSE;
     }
 
+    invalidate_prefix_cache();
     if (ctx) { llama_free(ctx); ctx = nullptr; }
     if (model) { llama_model_free(model); model = nullptr; }
 
@@ -191,6 +208,7 @@ Java_com_timebox_native_1llama_NativeLlamaPlugin_resetContext(JNIEnv *env, jobje
         return JNI_FALSE;
     }
     active_n_ctx = cparams.n_ctx;
+    invalidate_prefix_cache(); // the KV that cache described no longer exists
     LOGI("resetContext: context recreated (n_ctx=%d)", cparams.n_ctx);
     return JNI_TRUE;
 }
@@ -395,6 +413,24 @@ static std::vector<jchar> utf8_to_utf16(const std::string &s) {
     return out;
 }
 
+/// Samples one token, converting a grammar failure into end-of-generation.
+///
+/// A GBNF grammar throws std::runtime_error if it is ever asked to accept a
+/// token it has ruled out, and llama_sampler_sample accepts internally — so the
+/// throw comes out of the sample call. Uncaught it reaches
+/// ggml_uncaught_exception and kills the app mid-reflection. Ending the stream
+/// instead leaves the caller with whatever was produced, which its own parser
+/// and fallbacks already handle. Sets failed and returns 0 on failure.
+static llama_token sampleOrStop(llama_sampler * smpl, llama_context * lctx, int32_t idx, bool & failed) {
+    try {
+        return llama_sampler_sample(smpl, lctx, idx);
+    } catch (const std::exception & e) {
+        LOGE("Generation stopped by sampler: %s", e.what());
+        failed = true;
+        return 0;
+    }
+}
+
 static bool sendToken(JNIEnv *env, jobject thiz, jmethodID methodID, const struct llama_vocab * vocab, llama_token token, bool &is_eog_out) {
     char buf[128];
     int n = llama_token_to_piece(vocab, token, buf, sizeof(buf), 0, true);
@@ -433,11 +469,29 @@ const struct llama_vocab * vocab = llama_model_get_vocab(model);
 int n_media = media_paths != nullptr ? env->GetArrayLength(media_paths) : 0;
 bool use_draft = (ctx_draft != nullptr && n_media == 0);
 
-// Fully reset context between generations. A partial seq_rm(-1,-1,-1) does NOT
-// reset the cell tails of recurrent/hybrid models (e.g. Qwen3-Next / Mamba),
-// tripping GGML_ASSERT(cell.has_seq_id(seq_id)) in find_slot on the next decode.
-llama_memory_clear(llama_get_memory(ctx), true);
-if (use_draft) llama_memory_clear(llama_get_memory(ctx_draft), true);
+// Whether this call may reuse the KV already in the cache (see cached_tokens).
+// Two paths never can:
+//
+//  • MTMD/vision — image chunks go through mtmd_helper_eval_chunks, which owns
+//    the position cursor and (for M-RoPE models) lays positions out in a way
+//    plain token indices don't describe. We can't mirror that, so vision always
+//    starts clean.
+//  • Speculative decoding — the draft context would have to track the target's
+//    cache through accept/reject rollbacks. Not worth it: a grammar already
+//    disables drafting, and every structured caller uses one.
+//
+// Everything else defers to the text-only prefill below, which reuses whatever
+// prefix it can and clears only when it must.
+const bool may_reuse_prefix = !use_draft && !(mtmd_ctx != nullptr && n_media > 0);
+
+if (!may_reuse_prefix) {
+    // Fully reset context between generations. A partial seq_rm(-1,-1,-1) does NOT
+    // reset the cell tails of recurrent/hybrid models (e.g. Qwen3-Next / Mamba),
+    // tripping GGML_ASSERT(cell.has_seq_id(seq_id)) in find_slot on the next decode.
+    llama_memory_clear(llama_get_memory(ctx), true);
+    if (use_draft) llama_memory_clear(llama_get_memory(ctx_draft), true);
+    invalidate_prefix_cache();
+}
 
 uint32_t n_batch_size = llama_n_batch(ctx);
 if (use_draft) { n_batch_size = std::min(n_batch_size, llama_n_batch(ctx_draft)); }
@@ -544,6 +598,13 @@ if (grammar != nullptr) {
         llama_sampler * gsmpl = llama_sampler_init_grammar(vocab, grammar_str, "root");
         if (gsmpl != nullptr) {
             llama_sampler_chain_add(smpl, gsmpl);
+            // Speculative decoding and a grammar cannot share one sampler chain:
+            // drafting advances the grammar's stack for tokens verification may
+            // then discard, and there is no API to rewind it. The desynchronised
+            // grammar then aborts the process the first time it is asked to
+            // accept a token it has ruled out. A grammared reply is worth more
+            // than the speed-up.
+            use_draft = false;
         } else {
             LOGE("Grammar failed to parse; continuing unconstrained");
         }
@@ -627,8 +688,29 @@ prompt_tokens.resize(tokenized_count);
 
 n_prompt_tokens_total = prompt_tokens.size();
 
+// How much of this prompt is already sitting in the KV cache?
+//
+// A chat turn re-sends the whole conversation, so the new prompt is almost
+// always the previous one plus the model's last reply plus the new user turn.
+// Re-prefilling that shared head is the dominant cost of time-to-first-token —
+// thousands of tokens recomputed for something the cache already holds.
+const nl_prefix_plan plan = nl_plan_prefix_reuse(cached_tokens, prompt_tokens, may_reuse_prefix);
+size_t n_reuse = plan.n_reuse;
+
+if (plan.needs_trim) {
+// The prompt diverged from the cache; evict the tail past the common prefix. A
+// false here means this architecture cannot be rewound (see nl-kv-reuse.h) —
+// fall back to a clean prefill, which is merely slow instead of wrong.
+if (!llama_memory_seq_rm(llama_get_memory(ctx), 0, (llama_pos) n_reuse, -1)) {
+llama_memory_clear(llama_get_memory(ctx), true);
+n_reuse = 0;
+}
+} else if (plan.needs_clear) {
+llama_memory_clear(llama_get_memory(ctx), true);
+}
+
 llama_batch batch = llama_batch_init(n_batch_size, 0, 1);
-int n_eval = 0;
+int n_eval = (int) n_reuse;
 
 while (n_eval < (int)prompt_tokens.size()) {
 int n_chunk = std::min((int)prompt_tokens.size() - n_eval, (int)n_batch_size);
@@ -643,6 +725,8 @@ batch.n_tokens++;
 }
 
 if (llama_decode(ctx, batch) != 0) {
+// The cache no longer matches what we think it holds.
+invalidate_prefix_cache();
 llama_batch_free(batch);
 llama_sampler_free(smpl);
 return;
@@ -661,11 +745,18 @@ n_eval += n_chunk;
 }
 n_cur = n_eval;
 llama_batch_free(batch);
+
+// The cache now holds exactly this prompt. Generated tokens are appended as
+// they are decoded, below. Only tracked on the path allowed to reuse it — with
+// drafting on, accept/reject rollbacks move the cache in ways this vector does
+// not follow.
+if (may_reuse_prefix) cached_tokens = prompt_tokens;
 }
 
 const uint32_t n_ctx_max = llama_n_ctx(ctx);
 const int n_draft = 5;
 bool is_eog_reached = false;
+bool sample_failed = false;
 
 llama_batch decode_batch = llama_batch_init(1, 0, 1);
 decode_batch.n_seq_id[0] = 1;
@@ -675,17 +766,38 @@ if (n_prompt_tokens_total <= 0) {
 n_prompt_tokens_total = n_cur;
 }
 
+// llama_sampler_sample applies the chain *and then accepts the token it chose*
+// into that chain — see the end of llama_sampler_sample() in llama-sampler.cpp.
+// So nothing below accepts again. Doing so advanced every stateful sampler twice
+// per token; for a grammar that meant its stack ran two steps ahead of the text
+// actually emitted, and the first token the desynchronised stack could not
+// accept threw std::runtime_error out of a C++ path with no handler — SIGABRT,
+// mid-generation.
 while (true) {
-if (stop_generation || is_eog_reached) break;
+if (stop_generation || is_eog_reached || sample_failed) break;
 
 if (n_cur + n_draft + 1 >= n_ctx_max) {
 int n_keep = n_prompt_tokens_total;
 if (n_keep >= n_ctx_max / 2) n_keep = n_ctx_max / 2;
 const int n_discard = (n_ctx_max - n_keep) / 2;
 
-llama_memory_seq_rm(llama_get_memory(ctx), 0, n_keep, n_keep + n_discard);
+// Context shift drops a window out of the middle of the sequence and slides the
+// tail back. On a recurrent/hybrid model that is exactly the rewind seq_rm
+// refuses to perform (see the prefill above), and ignoring the refusal would
+// leave the layer state describing tokens that are no longer there — silent
+// corruption for the rest of the reply. Stop cleanly instead and let the
+// caller's own truncation policy handle a conversation that outgrew the window.
+if (!llama_memory_seq_rm(llama_get_memory(ctx), 0, n_keep, n_keep + n_discard)) {
+LOGE("Context full and this architecture cannot shift; ending generation");
+invalidate_prefix_cache();
+break;
+}
 llama_memory_seq_add(llama_get_memory(ctx), 0, n_keep + n_discard, n_cur, -n_discard);
 n_cur -= n_discard;
+
+// The shift renumbered positions; cached_tokens no longer describes the cache,
+// and a shifted context can't serve as a reusable prefix.
+invalidate_prefix_cache();
 
 if (use_draft) {
 llama_memory_seq_rm(llama_get_memory(ctx_draft), 0, n_keep, n_keep + n_discard);
@@ -696,8 +808,8 @@ llama_memory_seq_add(llama_get_memory(ctx_draft), 0, n_keep + n_discard, n_cur, 
 std::vector<llama_token> draft_tokens;
 if (use_draft) {
 for (int i = 0; i < n_draft; ++i) {
-llama_token t = llama_sampler_sample(smpl, ctx_draft, -1);
-llama_sampler_accept(smpl, t);
+llama_token t = sampleOrStop(smpl, ctx_draft, -1, sample_failed);
+if (sample_failed) break;
 draft_tokens.push_back(t);
 
 decode_batch.token[0] = draft_tokens.back();
@@ -709,12 +821,12 @@ if (llama_decode(ctx_draft, decode_batch) != 0) { break; }
 }
 }
 
-llama_token t_extra = llama_sampler_sample(smpl, ctx, -1);
+llama_token t_extra = sampleOrStop(smpl, ctx, -1, sample_failed);
+if (sample_failed) break;
 int n_accepted = 0;
 
 if (!draft_tokens.empty() && t_extra == draft_tokens[0]) {
 sendToken(env, thiz, methodID, vocab, t_extra, is_eog_reached);
-llama_sampler_accept(smpl, t_extra);
 n_accepted = 1;
 
 llama_batch b_tgt = llama_batch_init((int)draft_tokens.size(), 0, 1);
@@ -729,10 +841,10 @@ b_tgt.n_tokens = (int)draft_tokens.size();
 if (llama_decode(ctx, b_tgt) != 0) { llama_batch_free(b_tgt); break; }
 
 for (int i = 1; i < (int)draft_tokens.size(); ++i) {
-llama_token t_verified = llama_sampler_sample(smpl, ctx, i - 1);
+llama_token t_verified = sampleOrStop(smpl, ctx, i - 1, sample_failed);
+if (sample_failed) break;
 if (t_verified == draft_tokens[i]) {
 sendToken(env, thiz, methodID, vocab, t_verified, is_eog_reached);
-llama_sampler_accept(smpl, t_verified);
 n_accepted++;
 if (is_eog_reached || llama_vocab_is_eog(vocab, t_verified)) { is_eog_reached = true; break; }
 } else {
@@ -740,8 +852,8 @@ t_extra = t_verified;
 break;
 }
 }
-if (!is_eog_reached && n_accepted == (int)draft_tokens.size()) {
-t_extra = llama_sampler_sample(smpl, ctx, (int)draft_tokens.size() - 1);
+if (!is_eog_reached && !sample_failed && n_accepted == (int)draft_tokens.size()) {
+t_extra = sampleOrStop(smpl, ctx, (int)draft_tokens.size() - 1, sample_failed);
 }
 if (n_accepted < (int)draft_tokens.size()) {
 llama_memory_seq_rm(llama_get_memory(ctx), 0, n_cur + n_accepted, -1);
@@ -750,10 +862,9 @@ if (use_draft) llama_memory_seq_rm(llama_get_memory(ctx_draft), 0, n_cur + n_acc
 llama_batch_free(b_tgt);
 }
 
-if (is_eog_reached) break;
+if (is_eog_reached || sample_failed) break;
 
 sendToken(env, thiz, methodID, vocab, t_extra, is_eog_reached);
-llama_sampler_accept(smpl, t_extra);
 if (is_eog_reached || llama_vocab_is_eog(vocab, t_extra)) { is_eog_reached = true; break; }
 
 decode_batch.token[0] = t_extra;
@@ -761,8 +872,14 @@ decode_batch.pos[0] = n_cur + n_accepted;
 decode_batch.n_tokens = 1;
 decode_batch.logits[0] = true;
 
-if (llama_decode(ctx, decode_batch) != 0) { break; }
+if (llama_decode(ctx, decode_batch) != 0) { invalidate_prefix_cache(); break; }
 if (use_draft) llama_decode(ctx_draft, decode_batch);
+
+// Mirror the decode into the prefix cache. An end-of-generation token is never
+// decoded (the loop breaks above), so it correctly never lands here — which is
+// what keeps the cache a strict prefix of the NEXT prompt, where the chat
+// template supplies the turn terminator itself.
+if (may_reuse_prefix) cached_tokens.push_back(t_extra);
 
 n_cur += n_accepted + 1;
 }
@@ -784,6 +901,7 @@ stop_generation = true;
 
 JNIEXPORT void JNICALL
 Java_com_timebox_native_1llama_NativeLlamaPlugin_disposeLlama(JNIEnv *env, jobject thiz) {
+    invalidate_prefix_cache();
     if (ctx) { llama_free(ctx); ctx = nullptr; }
     if (model) { llama_model_free(model); model = nullptr; }
     if (ctx_draft) { llama_free(ctx_draft); ctx_draft = nullptr; }

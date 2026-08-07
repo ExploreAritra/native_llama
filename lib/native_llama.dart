@@ -85,6 +85,40 @@ class NativeLlama {
   /// to turn it OFF for structured/list output (e.g. a JSON array of similar
   /// objects), which the penalty otherwise truncates by penalising the repeated
   /// structural tokens.
+  ///
+  /// ## KV prefix reuse — why message ORDER affects latency
+  ///
+  /// The backend remembers the exact token sequence left in the KV cache and, on
+  /// the next call, re-prefills only the part of the prompt that actually
+  /// changed. In a normal chat — where each turn re-sends the whole conversation
+  /// plus one more exchange — that turns a multi-thousand-token prefill into a
+  /// few dozen tokens, which is most of the time-to-first-token.
+  ///
+  /// It happens automatically; there is nothing to enable. But it only pays off
+  /// to the extent that the *start* of the prompt is unchanged, so put the
+  /// stable content first:
+  ///
+  /// ```
+  ///   system rules → persona → world state → retrieved context → turns → ask
+  ///   └────────────── stable, reused ──────────────┘ └── the part that changes ──┘
+  /// ```
+  ///
+  /// Editing an early message (rewriting the system prompt, swapping retrieved
+  /// context that sits ahead of the dialogue) invalidates everything after it and
+  /// costs a full prefill. Where content changes per turn, append it to the last
+  /// user message instead of splicing it into a system block up front.
+  ///
+  /// Reuse is skipped, and the context starts clean, when:
+  ///  * [mediaPaths] is non-empty — the vision path owns its own position cursor;
+  ///  * a draft model is loaded for speculative decoding (note that passing a
+  ///    [grammar] already disables drafting, so grammared calls keep reuse);
+  ///  * [resetContext] or [dispose] has run since the last generation.
+  ///
+  /// Reuse is never *silently* partial: if the architecture cannot rewind its
+  /// cache — which is the case for recurrent/hybrid models such as LFM2, whose
+  /// shortconv layers hold a rolling window rather than per-position state — the
+  /// backend falls back to a full, correct prefill. The observable behaviour of
+  /// this method is identical either way; only its speed changes.
   Stream<String> generateResponse(
       List<Map<String, String>> messages, {
         List<String>? mediaPaths, // --- MODIFIED: Accepts images & audio files ---
