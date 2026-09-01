@@ -34,12 +34,30 @@ add_definitions(-DMA_NO_COREAUDIO=1)
 
 include(FetchContent)
 
-# 1. Fetch Vulkan Headers (Required for Android GPU)
-FetchContent_Declare(VulkanHeaders GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git GIT_TAG main)
+# Vulkan and SPIR-V headers, required to build ggml-vulkan for Android.
+#
+# PINNED DELIBERATELY. These were previously `GIT_TAG main`, which means an
+# upstream commit to a Khronos repository can break — or silently change — this
+# build with no local change and nothing in the diff to explain it. That is a
+# bad trade for headers: they move constantly and we gain nothing from tracking
+# them live.
+#
+# Both pins are the exact revisions the first successful Android build of
+# ai_rpg_game resolved and linked against (2026-08-07, arm64-v8a, Q1_0 Vulkan).
+# Vulkan-Headers landed exactly on a release tag; SPIRV-Headers sat four commits
+# past vulkan-sdk-1.4.357.0 and so has no tag of its own — hence the raw SHA,
+# which is in any case the more honest way to say "this exact tree".
+#
+# To bump: move both together, rebuild, and confirm libggml-vulkan.so still
+# links. Do not bump one alone.
+FetchContent_Declare(VulkanHeaders
+    GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
+    GIT_TAG v1.4.359)
 FetchContent_MakeAvailable(VulkanHeaders)
 
-# 2. Fetch SPIR-V Headers (Required for Android GPU)
-FetchContent_Declare(SPIRVHeaders GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Headers.git GIT_TAG main)
+FetchContent_Declare(SPIRVHeaders
+    GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Headers.git
+    GIT_TAG 942fe4b988359a0750b79f0ae7ed735994d3147d)  # vulkan-sdk-1.4.357.0-4
 FetchContent_MakeAvailable(SPIRVHeaders)
 
 # 3. CRITICAL FIX: Point directly to the single source of truth in the iOS folder!

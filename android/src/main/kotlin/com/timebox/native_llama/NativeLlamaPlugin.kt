@@ -1,7 +1,9 @@
 package com.timebox.native_llama
 
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import androidx.annotation.Keep
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.EventChannel
@@ -21,8 +23,38 @@ class NativeLlamaPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHa
     private val executor = Executors.newSingleThreadExecutor()
 
     companion object {
-        init {
+        private const val TAG = "NativeLlamaPlugin"
+
+        /// Whether libnative_llama.so is present and loadable on this device.
+        ///
+        /// The library is built for arm64-v8a only (see `abiFilters` in
+        /// android/build.gradle.kts), so on any other ABI the load fails and
+        /// every `external` method below would throw UnsatisfiedLinkError.
+        ///
+        /// This used to be a bare `System.loadLibrary` in a companion `init`,
+        /// which made that an Error thrown from the *class initializer* — i.e.
+        /// from `new NativeLlamaPlugin()` inside GeneratedPluginRegistrant.
+        /// That registrant only catches `Exception`, and UnsatisfiedLinkError
+        /// is an `Error`, so it escaped configureFlutterEngine() and killed the
+        /// process before Dart main() ever ran. Google Play review (x86_64
+        /// emulators) saw that as "crashes after opening", and Crashlytics
+        /// never reported it because a 100%-reproducible startup crash can
+        /// never upload the report it queued on the previous launch.
+        ///
+        /// Catching Throwable here degrades the LLM features to unavailable
+        /// instead of taking the whole app down with them.
+        @JvmStatic
+        val isAvailable: Boolean = try {
             System.loadLibrary("native_llama")
+            true
+        } catch (t: Throwable) {
+            Log.e(
+                TAG,
+                "libnative_llama.so unavailable on ABI " +
+                    "${Build.SUPPORTED_ABIS.firstOrNull()} — LLM features disabled",
+                t
+            )
+            false
         }
     }
 
@@ -57,6 +89,18 @@ class NativeLlamaPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHa
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {
+        // Without the native library every branch below would throw
+        // UnsatisfiedLinkError off the executor thread, where nothing catches
+        // it. Fail the call instead so Dart can fall back to a non-LLM path.
+        if (!isAvailable) {
+            result.error(
+                "NATIVE_UNAVAILABLE",
+                "native_llama is not available on this device's ABI " +
+                    "(${Build.SUPPORTED_ABIS.firstOrNull()}).",
+                null
+            )
+            return
+        }
         when (call.method) {
             "initModel" -> {
                 val modelPath = call.argument<String>("modelPath")
@@ -180,7 +224,10 @@ class NativeLlamaPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHa
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         methodChannel.setMethodCallHandler(null)
         eventChannel.setStreamHandler(null)
-        disposeLlama()
+        // Guarded for the same reason as onMethodCall: with no native library
+        // this is an UnsatisfiedLinkError on the way *out* of the engine, which
+        // would crash teardown on every non-arm64 device.
+        if (isAvailable) disposeLlama()
     }
 
     // FIX: Push EOS string explicitly so Dart can catch it manually

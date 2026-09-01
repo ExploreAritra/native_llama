@@ -262,6 +262,20 @@ static llama_token nl_sample_or_stop(llama_sampler * smpl, llama_context * lctx,
 
 - (NSArray<NSNumber *> *)getEmbedding:(NSString *)text {
     if (ctx == nullptr || model == nullptr) return nil;
+    // Generation turns this off (see startGenerationWithRoles:) because it makes
+    // every prompt token an output. Turn it back on here, where the embeddings
+    // are the entire point. The KV this leaves behind is cleared below anyway.
+    llama_set_embeddings(ctx, true);
+
+    // Clear the KV before embedding, and invalidate the prefix cache that
+    // described it. Android's getEmbedding has done this since it was written
+    // ("CRITICAL FIX: Clear the KV cache so embeddings don't stack up
+    // indefinitely!"); iOS never did, so every embedding call left its tokens
+    // in the cache and the next one embedded on top of them. Wrong vectors, and
+    // a context that fills up for no reason.
+    llama_memory_clear(llama_get_memory(ctx), true);
+    [self invalidatePrefixCache];
+
     const struct llama_vocab * vocab = llama_model_get_vocab(model);
     const char * prompt = [text UTF8String];
 
@@ -307,6 +321,28 @@ struct GenerationGuard {
 
 - (void)startGenerationWithRoles:(NSArray<NSString *> *)roles contents:(NSArray<NSString *> *)contents mediaPaths:(NSArray<NSString *> *)mediaPaths temperature:(float)temperature topK:(int)topK topP:(float)topP repeatPenalty:(float)repeatPenalty penaltyLastN:(int)penaltyLastN freqPenalty:(float)freqPenalty presencePenalty:(float)presencePenalty grammar:(NSString *)grammar onToken:(void (^)(NSString *))onToken {
     if (ctx == nullptr || model == nullptr) return;
+
+    // One context cannot decode twice at once. A second llama_decode while the
+    // first is in flight fails the Metal command buffer, leaves the backend in
+    // an unrecoverable error state, and aborts the PROCESS on
+    // GGML_ASSERT(out_ids.size() == n_outputs) — a hard crash with a backtrace
+    // that points at the assert rather than at the overlap that caused it.
+    //
+    // Observed for real: a caller kicked off a cache-warming generation without
+    // awaiting it, the user tapped, and the app died. Refusing the second call
+    // is not a fix for that caller's bug — they still must serialise — but a
+    // dropped generation beats a dead app, and the log line names the cause.
+    if (is_generating) {
+        fprintf(stderr, "nl_generate: called while already generating - refused. "
+                        "Serialise your calls; one context cannot decode twice at once.\n");
+        // Must be the end-of-stream sentinel, not nil: the Swift layer drops a
+        // nil token (`guard let token = token else { return }`) and only closes
+        // the Dart stream on this exact string. Returning nil here would swap a
+        // crash for a caller hanging forever, which is worse.
+        if (onToken) onToken(@"__END_OF_STREAM__");
+        return;
+    }
+
     GenerationGuard guard(&is_generating);
     stop_generation = false;
     const struct llama_vocab * vocab = llama_model_get_vocab(model);
@@ -338,6 +374,23 @@ struct GenerationGuard {
     //
     // Everything else defers the decision to the text-only prefill below, which
     // reuses whatever prefix it can and clears only when it must.
+    // Generation does not want embeddings, and leaving them on is expensive in
+    // a way that is invisible unless you read the log.
+    //
+    // The context is created with cparams.embeddings = true so getEmbedding:
+    // works. But with that flag set, llama_batch_allocr sees a prefill batch
+    // whose interior tokens are not marked as outputs and OVERRIDES THEM ALL to
+    // true (llama-batch.cpp, "embeddings required but some input tokens were not
+    // marked as outputs -> overriding"). Every prompt token then gets a full
+    // output computed instead of just the last one, and the output buffer grows
+    // from 0.59 MiB to 75.31 MiB. On a ~1,200-token prompt that tax lands on
+    // every single turn, and it is paid during prefill — the part the player
+    // waits through before the first word appears.
+    //
+    // Toggle it off for generation and back on where embeddings are actually
+    // read. Callers of getEmbedding: are unaffected.
+    llama_set_embeddings(ctx, false);
+
     const bool has_media = (mediaPaths != nullptr && mediaPaths.count > 0);
     const bool may_reuse_prefix = !use_draft && !(mtmd_ctx != nullptr && has_media);
 
@@ -481,8 +534,37 @@ struct GenerationGuard {
             n_cur = new_n_past;
             n_prompt_tokens_total = n_cur;
         } else {
-            NSLog(@"MTMD Tokenize failed with error code: %d", tok_res);
-            n_prompt_tokens_total = 0;
+            // LOCAL PATCH: end the stream here instead of falling through.
+            //
+            // This used to log and set n_prompt_tokens_total = 0, then continue
+            // into the generation loop below — where nothing had been decoded, so
+            // llama_sampler_sample hit `get_logits_ith: invalid logits id -1,
+            // reason: corrupt output buffer (n_outputs=0)` and llama.cpp called
+            // ggml_abort. That is a SIGABRT, not a C++ exception: it kills the app
+            // outright, and nl_sample_or_stop's try/catch cannot see it.
+            //
+            // mtmd_tokenize fails for ordinary, caller-reachable reasons, so this
+            // is not a theoretical path. Chiefly: the number of media markers in
+            // the prompt must equal the number of bitmaps (it returns 1 otherwise)
+            // — and note a bitmap is silently skipped just above when
+            // mtmd_helper_bitmap_init_from_file cannot read the file, so a corrupt
+            // or unsupported image on its own is enough to arrive here with one
+            // marker and zero bitmaps.
+            //
+            // Ending the stream matches how this file already handles a refused
+            // generation and a throwing sampler: the caller gets an empty result
+            // through its normal path instead of a dead process.
+            NSLog(@"MTMD Tokenize failed with error code: %d "
+                   "(media marker/bitmap mismatch, or an unreadable image). "
+                   "Ending generation instead of sampling with no logits.", tok_res);
+            mtmd_input_chunks_free(chunks);
+            for (auto b : bitmaps) mtmd_bitmap_free(b);
+            llama_sampler_free(smpl);
+            // Same sentinel contract as the is_generating guard above: the Swift
+            // layer drops a nil token and closes the Dart stream only on this
+            // exact string, so returning without it would hang the caller.
+            if (onToken) onToken(@"__END_OF_STREAM__");
+            return;
         }
 
         mtmd_input_chunks_free(chunks);
@@ -509,6 +591,9 @@ struct GenerationGuard {
         const nl_prefix_plan plan =
             nl_plan_prefix_reuse(cached_tokens, prompt_tokens, may_reuse_prefix);
         size_t n_reuse = plan.n_reuse;
+        const bool trim_wanted = plan.needs_trim;
+        bool trim_refused = false;
+        const double t_prefill_start = CFAbsoluteTimeGetCurrent();
 
         if (plan.needs_trim) {
             // The prompt diverged from the cache; evict the tail past the common
@@ -518,6 +603,7 @@ struct GenerationGuard {
             if (!llama_memory_seq_rm(llama_get_memory(ctx), 0, (llama_pos) n_reuse, -1)) {
                 llama_memory_clear(llama_get_memory(ctx), true);
                 n_reuse = 0;
+                trim_refused = true;
             }
         } else if (plan.needs_clear) {
             llama_memory_clear(llama_get_memory(ctx), true);
@@ -558,6 +644,26 @@ struct GenerationGuard {
         }
         n_cur = n_eval;
         llama_batch_free(batch);
+
+        // The one number nobody could see. Everything about prefill cost was
+        // guesswork from the outside — llama-server prints prompt_n/prompt_ms
+        // and this did not, so on device there was no way to tell a working KV
+        // reuse from a full re-prefill every turn. They differ by ~7x.
+        //
+        // Reads: "reused N of M, prefilled K in T ms". If `reused` stays near 0
+        // across the turns of one scene, prefix reuse is not working and THAT is
+        // the latency, not the model.
+        // stderr, NOT NSLog. Everything llama.cpp prints goes to stderr, and
+        // that is what gets captured when someone grabs a device log; NSLog
+        // goes to os_log and does not appear there. The first version of this
+        // line used NSLog and was simply absent from the log it was written for.
+        fprintf(stderr,
+                "nl_prefill: reused %zu of %zu, prefilled %d in %.0f ms (%s)%s\n",
+                n_reuse, prompt_tokens.size(),
+                (int)prompt_tokens.size() - (int)n_reuse,
+                (CFAbsoluteTimeGetCurrent() - t_prefill_start) * 1000.0,
+                trim_wanted ? "trim" : "append",
+                trim_refused ? " TRIM REFUSED -> full prefill" : "");
 
         // The cache now holds exactly this prompt. Generated tokens are appended
         // as they are decoded, below. Only track it on the path that is allowed

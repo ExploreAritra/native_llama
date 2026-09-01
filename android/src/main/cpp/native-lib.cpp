@@ -297,6 +297,12 @@ JNIEXPORT jdoubleArray JNICALL
 Java_com_timebox_native_1llama_NativeLlamaPlugin_getEmbedding(JNIEnv *env, jobject thiz, jstring text) {
     if (ctx == nullptr || model == nullptr) return nullptr;
 
+    // Generation turns this off (see the note above may_reuse_prefix) because it
+    // makes every prompt token an output. Turn it back on here, where the
+    // embeddings are the entire point.
+    llama_set_embeddings(ctx, true);
+    invalidate_prefix_cache();
+
     const char * prompt = env->GetStringUTFChars(text, nullptr);
     const struct llama_vocab * vocab = llama_model_get_vocab(model);
 
@@ -482,6 +488,21 @@ bool use_draft = (ctx_draft != nullptr && n_media == 0);
 //
 // Everything else defers to the text-only prefill below, which reuses whatever
 // prefix it can and clears only when it must.
+// Generation does not want embeddings, and leaving them on is expensive in a
+// way that is invisible unless you read the log.
+//
+// The context is created with cparams.embeddings = true so getEmbedding works.
+// With that flag set, llama_batch_allocr sees a prefill batch whose interior
+// tokens are not marked as outputs and OVERRIDES THEM ALL to true
+// (llama-batch.cpp, "embeddings required but some input tokens were not marked
+// as outputs -> overriding"). Every prompt token then gets a full output
+// computed instead of just the last, and the output buffer grows from 0.59 MiB
+// to 75.31 MiB. On a ~1,200-token prompt that lands on every turn, during
+// prefill — the part the player waits through before the first word.
+//
+// Kept in step with the iOS bridge; change both or neither.
+llama_set_embeddings(ctx, false);
+
 const bool may_reuse_prefix = !use_draft && !(mtmd_ctx != nullptr && n_media > 0);
 
 if (!may_reuse_prefix) {
@@ -670,8 +691,32 @@ n_cur = new_n_past;
 n_prompt_tokens_total = n_cur;
 LOGI("Media evaluation complete! Context cursor is now at: %d", n_cur);
 } else {
-LOGE("MTMD Tokenize failed with error code: %d", tok_res);
-n_prompt_tokens_total = 0;
+// LOCAL PATCH: end the stream here instead of falling through.
+//
+// This used to log and set n_prompt_tokens_total = 0, then continue into the
+// generation loop below — where nothing had been decoded, so
+// llama_sampler_sample hit `get_logits_ith: invalid logits id -1, reason:
+// corrupt output buffer (n_outputs=0)` and llama.cpp called ggml_abort. That
+// is an abort(), not a C++ exception, so it kills the app outright and no
+// try/catch on the sampling call can see it.
+//
+// mtmd_tokenize fails for ordinary, caller-reachable reasons, so this is not a
+// theoretical path. Chiefly: the number of media markers in the prompt must
+// equal the number of bitmaps (it returns 1 otherwise) — and note a bitmap is
+// silently skipped just above when mtmd_helper_bitmap_init_from_file cannot
+// read the file, so a corrupt or unsupported image on its own is enough to
+// arrive here with one marker and zero bitmaps.
+LOGE("MTMD Tokenize failed with error code: %d (media marker/bitmap mismatch, "
+     "or an unreadable image). Ending generation instead of sampling with no logits.", tok_res);
+mtmd_input_chunks_free(chunks);
+for (auto b : bitmaps) mtmd_bitmap_free(b);
+llama_sampler_free(smpl);
+// The Dart stream only closes on this exact sentinel, so it must be sent or
+// the caller waits forever.
+jstring mtmd_eos = env->NewStringUTF("__END_OF_STREAM__");
+env->CallVoidMethod(thiz, methodID, mtmd_eos);
+env->DeleteLocalRef(mtmd_eos);
+return;
 }
 
 mtmd_input_chunks_free(chunks);
