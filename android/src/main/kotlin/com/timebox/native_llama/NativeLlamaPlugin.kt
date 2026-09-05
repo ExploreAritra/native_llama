@@ -227,7 +227,28 @@ class NativeLlamaPlugin: FlutterPlugin, MethodCallHandler, EventChannel.StreamHa
         // Guarded for the same reason as onMethodCall: with no native library
         // this is an UnsatisfiedLinkError on the way *out* of the engine, which
         // would crash teardown on every non-arm64 device.
-        if (isAvailable) disposeLlama()
+        //
+        // Posted to the executor, NOT run here. onDetachedFromEngine arrives on
+        // the Android main thread, and disposing the model frees ~1.25 GB of
+        // weights and tears down a GPU (Vulkan/Metal) context that may still
+        // have work in flight — seconds of blocking, on the one thread that
+        // must never block. Held on the main thread it is an ANR while the user
+        // is leaving the app, which is the worst place to be reported from
+        // because nothing else about the app looks wrong.
+        //
+        // The executor is single-threaded, so this is also correctly ordered
+        // behind any generation still queued on it: free-after-use, never
+        // during. Nothing reads the engine after detach, so there is no result
+        // to wait for.
+        if (isAvailable) {
+            executor.execute {
+                try {
+                    disposeLlama()
+                } catch (t: Throwable) {
+                    // Teardown of a process that is going away regardless.
+                }
+            }
+        }
     }
 
     // FIX: Push EOS string explicitly so Dart can catch it manually
