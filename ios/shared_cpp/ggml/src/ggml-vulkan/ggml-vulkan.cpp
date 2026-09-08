@@ -876,6 +876,15 @@ struct vk_device_struct {
     ~vk_device_struct() {
         VK_LOG_DEBUG("destroy device " << name);
 
+        if (!device) {
+            // Initialisation threw before the logical device was created (an
+            // unsupported driver, for example). There is nothing to tear down,
+            // and every call below would dereference a null VkDevice. Handles
+            // owned by a device that DOES exist are safe: destroying a
+            // VK_NULL_HANDLE object is a no-op per the spec.
+            return;
+        }
+
         device.destroyFence(fence);
 
         ggml_vk_destroy_buffer(sync_staging);
@@ -4869,7 +4878,7 @@ static void ggml_vk_load_shaders(vk_device& device) {
 static bool ggml_vk_khr_cooperative_matrix_support(const vk::PhysicalDeviceProperties& props, const vk::PhysicalDeviceDriverProperties& driver_props, vk_device_architecture arch);
 static uint32_t ggml_vk_intel_shader_core_count(const vk::PhysicalDevice& vkdev);
 
-static vk_device ggml_vk_get_device(size_t idx) {
+static vk_device ggml_vk_get_device_init(size_t idx) {
     VK_LOG_DEBUG("ggml_vk_get_device(" << idx << ")");
 
     if (vk_instance.devices[idx] == nullptr) {
@@ -5635,6 +5644,22 @@ static vk_device ggml_vk_get_device(size_t idx) {
     }
 
     return vk_instance.devices[idx];
+}
+
+// ggml_vk_get_device_init publishes the new vk_device into the cache before it
+// has finished initialising, so an exception thrown while probing the physical
+// device -- "Unsupported device" on a driver without 16-bit storage, for
+// instance -- would leave a zombie entry behind. The next lookup then returns a
+// device whose vk::Device is still null and the first Vulkan call on it (e.g.
+// createFence from ggml_backend_vk_init) segfaults. Drop the half-built entry so
+// a later attempt re-runs the probe and fails cleanly instead of crashing.
+static vk_device ggml_vk_get_device(size_t idx) {
+    try {
+        return ggml_vk_get_device_init(idx);
+    } catch (...) {
+        vk_instance.devices[idx].reset();
+        throw;
+    }
 }
 
 static void ggml_vk_print_gpu_info(size_t idx) {
