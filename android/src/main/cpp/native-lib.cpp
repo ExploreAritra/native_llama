@@ -56,6 +56,24 @@ static void invalidate_prefix_cache() {
     cached_tokens.clear();
 }
 
+// A NULL-terminated -- and therefore empty -- device list. Handing this to
+// llama_model_params::devices pins the model, and every context built from it,
+// to the CPU backend. Leaving `devices` at nullptr is NOT equivalent: llama.cpp
+// then auto-selects every GPU/iGPU in the ggml registry regardless of
+// n_gpu_layers, and llama_context calls ggml_backend_dev_init on each of them.
+// On a device whose Vulkan driver ggml rejects (e.g. the Adreno 610, which has
+// no storageBuffer16BitAccess -> "Unsupported device"), ggml-vulkan has already
+// cached the half-constructed device it threw out of, so that second init hands
+// back a vk_device with a null VkDevice and creating its fence segfaults inside
+// libvulkan. Selecting no GPU device at all keeps us clear of that entirely.
+static ggml_backend_dev_t cpu_only_devices[] = { nullptr };
+
+// Latched once a GPU offload attempt has failed. Because ggml-vulkan keeps that
+// failed device in a process-global cache, anything that reaches for the GPU
+// afterwards (a second context, the mtmd vision encoder) can hard-crash rather
+// than just fail, so once this is set we stay on the CPU for the whole process.
+static bool gpu_unusable = false;
+
 double getPhysicalMemoryGB() {
     long pages = sysconf(_SC_PHYS_PAGES);
     long page_size = sysconf(_SC_PAGE_SIZE);
@@ -116,6 +134,10 @@ Java_com_timebox_native_1llama_NativeLlamaPlugin_initLlama(JNIEnv *env, jobject 
 
     auto mparams = llama_model_default_params();
     mparams.n_gpu_layers = n_gpu_layers;
+    if (n_gpu_layers == 0 || gpu_unusable) {
+        mparams.n_gpu_layers = 0;
+        mparams.devices = cpu_only_devices;
+    }
 
     model = llama_model_load_from_file(path, mparams);
 
@@ -124,11 +146,14 @@ Java_com_timebox_native_1llama_NativeLlamaPlugin_initLlama(JNIEnv *env, jobject 
     // where a Vulkan device IS present but the GPU load fails (out-of-memory,
     // driver/shader error). The other case -- no usable Vulkan device at all --
     // does NOT hit this path: ggml already keeps all layers on the CPU and the
-    // load succeeds. mparams.n_gpu_layers is left at 0 so the context below is
-    // built for the CPU too.
-    if (model == nullptr && n_gpu_layers != 0) {
+    // load succeeds. The retry also drops every GPU device from the model, so the
+    // context below is built for the CPU too and never re-enters the backend that
+    // just failed.
+    if (model == nullptr && mparams.n_gpu_layers != 0) {
         LOGE("GPU model load failed; falling back to CPU (n_gpu_layers=0)");
+        gpu_unusable = true;
         mparams.n_gpu_layers = 0;
+        mparams.devices = cpu_only_devices;
         model = llama_model_load_from_file(path, mparams);
     }
 
@@ -162,7 +187,9 @@ Java_com_timebox_native_1llama_NativeLlamaPlugin_initLlama(JNIEnv *env, jobject 
     if (ctx == nullptr && mparams.n_gpu_layers != 0) {
         LOGE("GPU context creation failed; reloading model on CPU");
         llama_model_free(model);
+        gpu_unusable = true;
         mparams.n_gpu_layers = 0;
+        mparams.devices = cpu_only_devices;
         model = llama_model_load_from_file(path, mparams);
         if (model != nullptr) {
             ctx = llama_init_from_model(model, cparams);
@@ -230,8 +257,10 @@ Java_com_timebox_native_1llama_NativeLlamaPlugin_initVision(JNIEnv *env, jobject
     // Vision encoder on the GPU (Vulkan). The A19-Metal "tensor API" bug that made
     // iOS extraction return all-empty fields is Metal-only (fixed there via
     // GGML_METAL_TENSOR_DISABLE); it does not apply to the Vulkan backend, so
-    // Android keeps the vision encoder on the GPU for speed.
-    mtmd_params.use_gpu = true;
+    // Android keeps the vision encoder on the GPU for speed -- unless the text
+    // model already found the GPU unusable, in which case clip would initialise
+    // the same broken Vulkan device and crash instead of falling back.
+    mtmd_params.use_gpu = !gpu_unusable;
     // Full-page document reads (Qwen2.5-VL) need enough vision tokens to keep
     // fine print legible; 1536 handles a dense A4 page without tiling.
     mtmd_params.image_max_tokens = 1536;
@@ -259,7 +288,21 @@ Java_com_timebox_native_1llama_NativeLlamaPlugin_initDraftModel(JNIEnv *env, job
 
     auto mparams = llama_model_default_params();
     mparams.n_gpu_layers = n_gpu_layers;
+    if (n_gpu_layers == 0 || gpu_unusable) {
+        mparams.n_gpu_layers = 0;
+        mparams.devices = cpu_only_devices;
+    }
     model_draft = llama_model_load_from_file(path, mparams);
+
+    // Same GPU -> CPU fallback as initLlama: retry CPU-only with no GPU device
+    // selected at all, so the context below cannot touch the failed backend.
+    if (model_draft == nullptr && mparams.n_gpu_layers != 0) {
+        LOGE("GPU draft model load failed; falling back to CPU (n_gpu_layers=0)");
+        gpu_unusable = true;
+        mparams.n_gpu_layers = 0;
+        mparams.devices = cpu_only_devices;
+        model_draft = llama_model_load_from_file(path, mparams);
+    }
 
     if (model_draft == nullptr) {
         env->ReleaseStringUTFChars(model_path, path);
