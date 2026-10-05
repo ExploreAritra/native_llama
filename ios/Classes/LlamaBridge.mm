@@ -5,6 +5,7 @@
 #import <string>
 #import <exception>
 #import <sys/stat.h>
+#import <Metal/Metal.h>
 
 // --- MTMD Headers ---
 #import "mtmd.h"
@@ -30,6 +31,38 @@ static llama_token nl_sample_or_stop(llama_sampler * smpl, llama_context * lctx,
     }
 }
 
+// Whether ggml's Metal backend can run flash attention on this GPU.
+//
+// It can only with simdgroup matrix multiply, which arrived with the Apple7 GPU
+// family (A14 / M1). On an A12 / A13 (iPad Pro 2018-2020, iPhone XS-11) the
+// flash-attention op is unsupported on the GPU, so llama.cpp resolves flash
+// attention to "off" for the context.
+static bool nl_gpu_supports_flash_attention() {
+    static bool supported = [] {
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        if (device == nil) return true; // no GPU to be limited by
+        bool ok = [device supportsFamily:MTLGPUFamilyApple7];
+        [device release]; // this file is built without ARC
+        return ok;
+    }();
+    return supported;
+}
+
+// The K/V cache type for a context that will offload [nGpuLayers] to the GPU.
+//
+// Q8_0 halves the cache, but a quantized V cache REQUIRES flash attention, and
+// llama.cpp refuses to create the context otherwise ("quantized V cache was
+// requested, but this requires Flash Attention"), so a model that fits easily
+// failed to load on those GPUs with nothing but a NO from initModel. They get an
+// unquantized (F16) cache instead and keep the GPU. A CPU-only load
+// (nGpuLayers == 0) runs flash attention on the CPU, so it keeps Q8_0.
+static ggml_type nl_kv_cache_type(int nGpuLayers) {
+    if (nGpuLayers != 0 && !nl_gpu_supports_flash_attention()) {
+        return GGML_TYPE_F16;
+    }
+    return GGML_TYPE_Q8_0;
+}
+
 @implementation LlamaBridge {
     llama_model *model;
     llama_context *ctx;
@@ -39,6 +72,7 @@ static llama_token nl_sample_or_stop(llama_sampler * smpl, llama_context * lctx,
     bool stop_generation;
     volatile bool is_generating;
     int32_t active_n_ctx; // resolved context window of the live ctx (for resetContext)
+    ggml_type active_kv_type; // K/V cache type the live ctx was built with (for resetContext)
 
     /// The exact token sequence currently held in the KV cache at seq 0,
     /// positions 0..cached_tokens.size()-1 — prompt tokens plus every token
@@ -87,6 +121,7 @@ static llama_token nl_sample_or_stop(llama_sampler * smpl, llama_context * lctx,
         stop_generation = false;
         is_generating = false;
         active_n_ctx = 0;
+        active_kv_type = GGML_TYPE_Q8_0;
     }
     return self;
 }
@@ -120,9 +155,11 @@ static llama_token nl_sample_or_stop(llama_sampler * smpl, llama_context * lctx,
     auto cparams = llama_context_default_params();
     cparams.n_threads = nThreads > 0 ? nThreads : 4;
     cparams.embeddings = true;
-    cparams.type_k = GGML_TYPE_Q8_0;
-    cparams.type_v = GGML_TYPE_Q8_0;
+    const ggml_type kv_type = nl_kv_cache_type(nGpuLayers);
+    cparams.type_k = kv_type;
+    cparams.type_v = kv_type;
     cparams.n_batch = 128;
+    NSLog(@"NATIVE_LLAMA: KV cache %s (gpu layers %d)", ggml_type_name(kv_type), nGpuLayers);
 
     if (nCtx > 0) {
         cparams.n_ctx = nCtx;
@@ -140,6 +177,7 @@ static llama_token nl_sample_or_stop(llama_sampler * smpl, llama_context * lctx,
         return NO;
     }
     active_n_ctx = cparams.n_ctx; // remember for a later resetContext
+    active_kv_type = kv_type;
     return YES;
 }
 
@@ -165,8 +203,8 @@ static llama_token nl_sample_or_stop(llama_sampler * smpl, llama_context * lctx,
     auto cparams = llama_context_default_params();
     cparams.n_threads = 4;
     cparams.embeddings = true;
-    cparams.type_k = GGML_TYPE_Q8_0;
-    cparams.type_v = GGML_TYPE_Q8_0;
+    cparams.type_k = active_kv_type;
+    cparams.type_v = active_kv_type;
     cparams.n_batch = 128;
     cparams.n_ctx = nCtx > 0 ? nCtx : (active_n_ctx > 0 ? active_n_ctx : 4096);
 
@@ -241,8 +279,9 @@ static llama_token nl_sample_or_stop(llama_sampler * smpl, llama_context * lctx,
     auto cparams = llama_context_default_params();
     cparams.n_threads = nThreads > 0 ? nThreads : 4;
     cparams.embeddings = true;
-    cparams.type_k = GGML_TYPE_Q8_0;
-    cparams.type_v = GGML_TYPE_Q8_0;
+    const ggml_type draft_kv_type = nl_kv_cache_type(nGpuLayers);
+    cparams.type_k = draft_kv_type;
+    cparams.type_v = draft_kv_type;
     cparams.n_batch = 32;
 
     if (nCtx > 0) {
