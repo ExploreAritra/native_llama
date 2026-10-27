@@ -64,6 +64,28 @@ FetchContent_MakeAvailable(SPIRVHeaders)
 # Path traversal: cpp -> main -> src -> android -> plugin_root -> ios/shared_cpp
 set(SHARED_CPP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../ios/shared_cpp")
 
+# glslc for ggml-vulkan's shaders. FindVulkan only looks in $VULKAN_SDK and on
+# PATH, and CMake 3.22 (AGP's) ignores the `glslc` component ggml-vulkan asks
+# for, so a missing glslc is not an error: vulkan-shaders-gen is handed
+# Vulkan_GLSLC_EXECUTABLE-NOTFOUND, every shader compile fails quietly, and the
+# link breaks on undefined *_data / *_len symbols. Fall back to the glslc the
+# NDK ships in shader-tools/<host>. It lacks the cooperative-matrix extensions,
+# so those shader variants are compiled out. Found here, the cached result is
+# what FindVulkan picks up.
+if (CMAKE_HOST_WIN32)
+    set(_ndk_host_tag windows-x86_64)
+elseif (CMAKE_HOST_APPLE)
+    set(_ndk_host_tag darwin-x86_64)
+else()
+    set(_ndk_host_tag linux-x86_64)
+endif()
+find_program(Vulkan_GLSLC_EXECUTABLE
+    NAMES glslc
+    HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin"
+    PATHS "${ANDROID_NDK}/shader-tools/${_ndk_host_tag}"
+    NO_CMAKE_FIND_ROOT_PATH)
+message(STATUS "native_llama: glslc: ${Vulkan_GLSLC_EXECUTABLE}")
+
 # Windows hosts: build ggml-vulkan's vulkan-shaders-gen host tool under a short
 # directory. It is an ExternalProject with no PREFIX, so by default it lands in
 # llama_cpp_build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/... — and with
