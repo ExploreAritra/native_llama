@@ -64,6 +64,21 @@ FetchContent_MakeAvailable(SPIRVHeaders)
 # Path traversal: cpp -> main -> src -> android -> plugin_root -> ios/shared_cpp
 set(SHARED_CPP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../ios/shared_cpp")
 
+# Windows hosts: build ggml-vulkan's vulkan-shaders-gen host tool under a short
+# directory. It is an ExternalProject with no PREFIX, so by default it lands in
+# llama_cpp_build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/... — and with
+# AGP's .cxx staging dir inside the pub cache, its try_compile files reach 260
+# characters. MSVC's cl.exe (the host compiler there) cannot open paths that
+# long even with LongPathsEnabled, so configuring the tool fails.
+#
+# EP_BASE is an inherited directory property, so setting it here moves every
+# ExternalProject below without patching the vendored llama.cpp. Other hosts
+# keep the default layout.
+if (CMAKE_HOST_WIN32)
+    include(ExternalProject)
+    set_property(DIRECTORY PROPERTY EP_BASE "${CMAKE_BINARY_DIR}/ep")
+endif()
+
 # Add the local directory to the build
 # (Requires a secondary binary_dir argument since the source is outside the current CMake tree)
 add_subdirectory("${SHARED_CPP_DIR}" llama_cpp_build)
